@@ -9,7 +9,7 @@ RUN npm run build   # outputs to /app/frontend/
 
 
 # ── Python backend ────────────────────────────────────────────────────────────
-FROM python:3.11-bookworm-slim
+FROM python:3.11-slim-bookworm
 
 WORKDIR /app
 

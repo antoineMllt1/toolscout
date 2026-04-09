@@ -4,7 +4,6 @@ import {
   useCallback,
   useContext,
   useEffect,
-  useEffectEvent,
   useMemo,
   useRef,
   useState,
@@ -12,6 +11,17 @@ import {
 
 const SearchContext = createContext(null)
 const STORAGE_KEY = 'ts_active_search_v2'
+const INITIAL_STATE = {
+  tool: '',
+  searchId: null,
+  status: 'idle',
+  results: [],
+  total: 0,
+  sourcesDone: [],
+  selectedResultId: null,
+  error: '',
+  loadedAt: null,
+}
 
 function parseStoredSearch() {
   try {
@@ -44,21 +54,16 @@ function decodeResult(result) {
 }
 
 export function SearchProvider({ children }) {
-  const [state, setState] = useState({
-    tool: '',
-    searchId: null,
-    status: 'idle',
-    results: [],
-    total: 0,
-    sourcesDone: [],
-    selectedResultId: null,
-    error: '',
-    loadedAt: null,
-  })
+  const [state, setState] = useState(INITIAL_STATE)
   const eventSourceRef = useRef(null)
   const bootedRef = useRef(false)
+  const stateRef = useRef(INITIAL_STATE)
 
-  const persistState = useEffectEvent((nextState) => {
+  useEffect(() => {
+    stateRef.current = state
+  }, [state])
+
+  const persistState = useCallback((nextState) => {
     try {
       if (!nextState.searchId) {
         localStorage.removeItem(STORAGE_KEY)
@@ -68,22 +73,27 @@ export function SearchProvider({ children }) {
     } catch {
       // ignore localStorage failures
     }
-  })
+  }, [])
 
-  const closeStream = useEffectEvent(() => {
+  const closeStream = useCallback(() => {
     if (eventSourceRef.current) {
       eventSourceRef.current.close()
       eventSourceRef.current = null
     }
-  })
+  }, [])
 
-  const subscribeToSearch = useEffectEvent((searchId) => {
+  const subscribeToSearch = useCallback((searchId) => {
     closeStream()
     const source = new EventSource(`/api/search/${searchId}/stream`)
     eventSourceRef.current = source
 
     source.onmessage = (event) => {
-      const message = JSON.parse(event.data)
+      let message
+      try {
+        message = JSON.parse(event.data)
+      } catch {
+        return
+      }
 
       if (message.type === 'result') {
         const incoming = decodeResult(message.data)
@@ -93,6 +103,7 @@ export function SearchProvider({ children }) {
             ...prev,
             results: [...prev.results, incoming],
             selectedResultId: prev.selectedResultId ?? incoming.id,
+            error: '',
           }
           persistState(next)
           return next
@@ -118,6 +129,7 @@ export function SearchProvider({ children }) {
             ...prev,
             status: 'completed',
             total: message.total || prev.total,
+            error: '',
             loadedAt: new Date().toISOString(),
           }
           persistState(next)
@@ -132,22 +144,24 @@ export function SearchProvider({ children }) {
         const next = {
           ...prev,
           status: prev.status === 'idle' ? 'error' : prev.status,
+          error: prev.status === 'completed' ? '' : 'Le flux de recherche a ete interrompu.',
         }
         persistState(next)
         return next
       })
       closeStream()
     }
-  })
+  }, [closeStream, persistState])
 
-  const hydrateSearch = useEffectEvent(async (searchId, options = {}) => {
+  const hydrateSearch = useCallback(async (searchId, options = {}) => {
     try {
       const response = await fetch(`/api/search/${searchId}/results`)
       if (!response.ok) throw new Error('Unable to restore search')
       const payload = await response.json()
       const results = (payload.results || []).map(decodeResult)
+      const currentState = stateRef.current
       const nextState = {
-        tool: options.keepTool ? state.tool : payload.search.tool_name,
+        tool: options.keepTool ? currentState.tool : payload.search.tool_name,
         searchId: payload.search.id,
         status: payload.search.status,
         results,
@@ -155,7 +169,7 @@ export function SearchProvider({ children }) {
         sourcesDone: (payload.search.sources_done || '').split(',').filter(Boolean),
         selectedResultId:
           options.selectedResultId ||
-          state.selectedResultId ||
+          currentState.selectedResultId ||
           results[0]?.id ||
           null,
         error: '',
@@ -171,17 +185,17 @@ export function SearchProvider({ children }) {
     } catch (error) {
       setState((prev) => ({ ...prev, status: 'error', error: error.message }))
     }
-  })
+  }, [closeStream, persistState, subscribeToSearch])
 
   useEffect(() => {
-    if (bootedRef.current) return
+    if (bootedRef.current) return undefined
     bootedRef.current = true
     const stored = parseStoredSearch()
     if (stored?.searchId) {
       hydrateSearch(stored.searchId, { selectedResultId: stored.selectedResultId })
     }
     return () => closeStream()
-  }, [])
+  }, [closeStream, hydrateSearch])
 
   const startSearch = useCallback(async (tool) => {
     const cleanTool = tool.trim()
@@ -222,30 +236,20 @@ export function SearchProvider({ children }) {
       setState((prev) => ({ ...prev, status: 'error', error: error.message }))
       return null
     }
-  }, [])
+  }, [closeStream, persistState, subscribeToSearch])
 
   const openSearch = useCallback((searchId) => {
     startTransition(() => {
       hydrateSearch(searchId)
     })
-  }, [])
+  }, [hydrateSearch])
 
   const clearSearch = useCallback(() => {
     closeStream()
-    const nextState = {
-      tool: '',
-      searchId: null,
-      status: 'idle',
-      results: [],
-      total: 0,
-      sourcesDone: [],
-      selectedResultId: null,
-      error: '',
-      loadedAt: null,
-    }
+    const nextState = { ...INITIAL_STATE }
     setState(nextState)
     persistState(nextState)
-  }, [])
+  }, [closeStream, persistState])
 
   const selectResult = useCallback((resultId) => {
     setState((prev) => {
@@ -253,7 +257,7 @@ export function SearchProvider({ children }) {
       persistState(next)
       return next
     })
-  }, [])
+  }, [persistState])
 
   const selectedResult = useMemo(
     () => state.results.find((result) => result.id === state.selectedResultId) || null,
@@ -270,7 +274,7 @@ export function SearchProvider({ children }) {
     clearSearch,
     selectResult,
     restoreSearch: hydrateSearch,
-  }), [state, selectedResult, startSearch, openSearch, clearSearch, selectResult])
+  }), [state, selectedResult, startSearch, openSearch, clearSearch, selectResult, hydrateSearch])
 
   return <SearchContext.Provider value={value}>{children}</SearchContext.Provider>
 }

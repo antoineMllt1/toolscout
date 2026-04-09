@@ -1,12 +1,15 @@
 import { startTransition, useEffect, useState } from 'react'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import { ApplicationProvider } from './context/ApplicationContext'
+import { FavoritesProvider } from './context/FavoritesContext'
 import { SearchProvider, useSearch } from './context/SearchContext'
 import SearchPage from './pages/SearchPage'
 import HistoryPage from './pages/HistoryPage'
 import DashboardPage from './pages/DashboardPage'
 import AuthPage from './pages/AuthPage'
 import CvStudioPage from './pages/CvStudioPage'
+import InterviewLabPage from './pages/InterviewLabPage'
+import CareerOpsPage from './pages/CareerOpsPage'
 import Navbar from './components/Navbar'
 import './index.css'
 
@@ -36,7 +39,7 @@ function AppInner() {
     return (
       <div className="app-loading-shell">
         <div className="app-loading-mark" />
-        <p>Chargement de votre dashboard.</p>
+        <p style={{ color: 'var(--muted)', fontSize: '13px' }}>Chargement…</p>
       </div>
     )
   }
@@ -46,12 +49,16 @@ function AppInner() {
   }
 
   return (
-    <div className="app-shell">
+    <div className="app-layout">
       <Navbar page={page} onNavigate={navigate} />
-      {page === 'search' && <SearchPage onNavigate={navigate} />}
-      {page === 'history' && <HistoryPage onOpen={openHistorySearch} />}
-      {page === 'dashboard' && <DashboardPage onNavigate={navigate} />}
-      {page === 'cv' && <CvStudioPage onNavigate={navigate} />}
+      <div className="app-content">
+        {page === 'search' && <SearchPage onNavigate={navigate} />}
+        {page === 'history' && <HistoryPage onOpen={openHistorySearch} />}
+        {page === 'dashboard' && <DashboardPage onNavigate={navigate} />}
+        {page === 'cv' && <CvStudioPage onNavigate={navigate} />}
+        {page === 'interview' && <InterviewLabPage onNavigate={navigate} />}
+        {page === 'ops' && <CareerOpsPage onNavigate={navigate} />}
+      </div>
     </div>
   )
 }
@@ -59,11 +66,13 @@ function AppInner() {
 export default function App() {
   return (
     <AuthProvider>
-      <ApplicationProvider>
-        <SearchProvider>
-          <AppInner />
-        </SearchProvider>
-      </ApplicationProvider>
+      <FavoritesProvider>
+        <ApplicationProvider>
+          <SearchProvider>
+            <AppInner />
+          </SearchProvider>
+        </ApplicationProvider>
+      </FavoritesProvider>
     </AuthProvider>
   )
 }

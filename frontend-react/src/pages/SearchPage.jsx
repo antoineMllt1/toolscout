@@ -2,6 +2,8 @@ import { useDeferredValue, useEffect, useMemo, useState } from 'react'
 import FilterBar from '../components/FilterBar'
 import JobCard from '../components/JobCard'
 import { useApplications } from '../context/ApplicationContext'
+import { useAuth } from '../context/AuthContext'
+import { useFavorites } from '../context/FavoritesContext'
 import { useSearch } from '../context/SearchContext'
 
 const POPULAR_TOOLS = ['n8n', 'Make', 'Airtable', 'Notion', 'Power BI', 'Tableau', 'HubSpot', 'dbt']
@@ -43,7 +45,7 @@ function formatSnippet(snippet) {
     .trim()
 }
 
-function SearchDetailPane({ result, onNavigate }) {
+function SearchDetailPane({ result, onNavigate, user, isFavorite, onToggleFavorite, onWatchCompany }) {
   if (!result) {
     return (
       <aside className="detail-pane empty">
@@ -109,14 +111,24 @@ function SearchDetailPane({ result, onNavigate }) {
           <h4>Prochaines actions</h4>
         </header>
         <div className="detail-action-stack">
+          {user ? (
+            <button className="secondary-button" onClick={() => onToggleFavorite(result)}>
+              {isFavorite ? 'Retirer des favoris' : 'Ajouter aux favoris'}
+            </button>
+          ) : null}
           <button className="secondary-button" onClick={() => onNavigate('dashboard')}>
             Classer dans mes candidatures
           </button>
           <button className="secondary-button" onClick={() => onNavigate('cv')}>
-            Preparer un CV cible
+            Ouvrir le profil candidat
           </button>
-          <button className="secondary-button" onClick={() => onNavigate('dashboard')}>
-            Ajouter a une veille
+          {user ? (
+            <button className="secondary-button" onClick={() => onWatchCompany(result)}>
+              Suivre la societe
+            </button>
+          ) : null}
+          <button className="secondary-button" onClick={() => onNavigate('ops')}>
+            Ouvrir career ops
           </button>
         </div>
       </section>
@@ -125,11 +137,14 @@ function SearchDetailPane({ result, onNavigate }) {
 }
 
 export default function SearchPage({ onNavigate }) {
+  const { user, authFetch } = useAuth()
+  const { byJobUrl: favoriteByUrl, toggleJobFavorite } = useFavorites()
   const {
     tool,
     results,
     total,
     status,
+    error,
     sourcesDone,
     isRunning,
     selectedResult,
@@ -140,6 +155,7 @@ export default function SearchPage({ onNavigate }) {
   } = useSearch()
   const { applications } = useApplications()
   const [draftTool, setDraftTool] = useState(tool)
+  const [actionFeedback, setActionFeedback] = useState('')
   const [filters, setFilters] = useState({
     query: '',
     source: [],
@@ -195,11 +211,13 @@ export default function SearchPage({ onNavigate }) {
     filteredResults[0] ||
     null
 
-  const statusCopy = isRunning
-    ? `La recherche continue meme si tu changes d'onglet ou de page. ${sourcesDone.length}/4 sources terminees.`
-    : total > 0
-      ? `${total} annonces remontees. Les filtres utilisent des categories normalisees pour eviter les doublons.`
-      : 'Lance une recherche et garde une vue synthetique de chaque annonce avant de partir sur le site source.'
+  const statusCopy = error
+    ? error
+    : isRunning
+      ? `La recherche continue meme si tu changes d'onglet ou de page. ${sourcesDone.length}/4 sources terminees.`
+      : total > 0
+        ? `${total} annonces remontees. Les filtres utilisent des categories normalisees pour eviter les doublons.`
+        : 'Lance une recherche et garde une vue synthetique de chaque annonce avant de partir sur le site source.'
 
   const sourceCards = Object.entries(SOURCE_META).map(([key, meta]) => ({
     key,
@@ -207,14 +225,51 @@ export default function SearchPage({ onNavigate }) {
     done: sourcesDone.includes(key),
   }))
 
+  async function handleToggleFavorite(result) {
+    if (!user) {
+      onNavigate('auth')
+      return
+    }
+    const existing = favoriteByUrl[result.job_url]
+    await toggleJobFavorite(result)
+    setActionFeedback(existing ? 'Annonce retiree des favoris.' : 'Annonce ajoutee aux favoris.')
+  }
+
+  async function handleWatchCompany(result) {
+    if (!user) {
+      onNavigate('auth')
+      return
+    }
+    const companyName = result.company_name || 'Company to watch'
+    const response = await authFetch('/api/company-portals', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        company_name: companyName,
+        careers_url: result.job_url,
+        active: true,
+        favorite: true,
+        cadence: 'weekly',
+        notes: `Ajoute depuis une annonce: ${result.job_title || ''}`.trim(),
+      }),
+    })
+    if (!response.ok) {
+      setActionFeedback('Impossible de creer la veille societe.')
+      return
+    }
+    setActionFeedback(`${companyName} ajoutee a la veille societe.`)
+  }
+
   return (
     <main className="workspace-page">
       <section className="search-dashboard-hero">
         <div className="command-center-card">
           <div className="command-center-head">
-            <div className="workspace-title-block compact dark command-center-copy">
-              <p className="eyebrow is-light">Command center</p>
-              <h1>Recherche active</h1>
+            <div className="command-center-copy">
+              <p className="eyebrow is-light">Recherche d'offres</p>
+              <h1 style={{ fontSize: '1.5rem', fontWeight: 800, color: '#fff', letterSpacing: '-0.03em', margin: '0 0 6px' }}>
+                Lance une recherche
+              </h1>
               <p className="lede is-light">{statusCopy}</p>
             </div>
             <div className="command-center-kpis">
@@ -256,6 +311,7 @@ export default function SearchPage({ onNavigate }) {
             {POPULAR_TOOLS.map((item) => (
               <button
                 key={item}
+                type="button"
                 className="filter-chip dark"
                 onClick={() => {
                   setDraftTool(item)
@@ -314,6 +370,8 @@ export default function SearchPage({ onNavigate }) {
         </div>
       </section>
 
+      {actionFeedback ? <div className="feedback-box info">{actionFeedback}</div> : null}
+
       <section className="workspace-grid">
         <FilterBar
           filters={filters}
@@ -343,6 +401,8 @@ export default function SearchPage({ onNavigate }) {
             <span>{isRunning ? 'Le flux continue en arriere-plan.' : 'Le resultat reste restaurable apres refresh.'}</span>
           </div>
 
+          {error ? <div className="feedback-box danger">{error}</div> : null}
+
           {filteredResults.length === 0 ? (
             <div className="empty-panel">
               <p className="eyebrow">Aucune carte</p>
@@ -364,7 +424,14 @@ export default function SearchPage({ onNavigate }) {
           )}
         </section>
 
-        <SearchDetailPane result={displayedSelectedResult} onNavigate={onNavigate} />
+        <SearchDetailPane
+          result={displayedSelectedResult}
+          onNavigate={onNavigate}
+          user={user}
+          isFavorite={Boolean(displayedSelectedResult && favoriteByUrl[displayedSelectedResult.job_url])}
+          onToggleFavorite={handleToggleFavorite}
+          onWatchCompany={handleWatchCompany}
+        />
       </section>
     </main>
   )

@@ -44,17 +44,19 @@ export default function AuthPage({ onSuccess }) {
     <main className="auth-page">
       <section className="auth-layout">
         <article className="auth-showcase fade-stagger" style={{ '--index': 0 }}>
-          <div className="brand auth-brand">
-            <span className="brand-mark">TS</span>
-            <span>
-              <strong>ToolScout</strong>
-              <small>Student search cockpit</small>
-            </span>
+          <div className="auth-brand">
+            <div className="brand-mark" style={{ width: 40, height: 40, borderRadius: 11, background: 'var(--brand-gradient)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 15, fontWeight: 800, color: 'white', boxShadow: 'var(--shadow-brand)' }}>
+              S
+            </div>
+            <div className="brand-logo-text">
+              <strong>StageAI</strong>
+              <small>Student workspace</small>
+            </div>
           </div>
 
           <div className="hero-copy">
             <p className="eyebrow is-light">Premium workspace</p>
-            <h1 className="auth-display">Pilote ta recherche de stage comme un vrai pipeline.</h1>
+            <h1 className="auth-display">Trouve ton stage, prépare ton CV, pilote tes candidatures.</h1>
             <p className="lede is-light">
               Un seul espace pour chercher des offres, preparer un CV cible par poste et suivre chaque candidature
               jusqu'a la reponse finale.

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import TagInput from '../components/TagInput'
 import { useApplications } from '../context/ApplicationContext'
 import { useAuth } from '../context/AuthContext'
+import { useFavorites } from '../context/FavoritesContext'
 
 const KANBAN_COLUMNS = [
   {
@@ -85,9 +86,12 @@ function formatLatestRun(watchlist) {
 
 export default function DashboardPage({ onNavigate }) {
   const { user, authFetch } = useAuth()
+  const { favorites } = useFavorites()
   const { applications, updateStatus, removeApplication } = useApplications()
   const [watchlists, setWatchlists] = useState([])
+  const [companyPortals, setCompanyPortals] = useState([])
   const [templates, setTemplates] = useState([])
+  const [profile, setProfile] = useState(null)
   const [submitting, setSubmitting] = useState(false)
   const [watchForm, setWatchForm] = useState({
     name: '',
@@ -100,7 +104,9 @@ export default function DashboardPage({ onNavigate }) {
   useEffect(() => {
     if (!user) return
     void loadWatchlists()
+    void loadCompanyPortals()
     void loadTemplates()
+    void loadProfile()
   }, [user])
 
   async function loadWatchlists() {
@@ -113,6 +119,18 @@ export default function DashboardPage({ onNavigate }) {
     const response = await fetch('/api/cv/templates')
     if (!response.ok) return
     setTemplates(await response.json())
+  }
+
+  async function loadCompanyPortals() {
+    const response = await authFetch('/api/company-portals')
+    if (!response.ok) return
+    setCompanyPortals(await response.json())
+  }
+
+  async function loadProfile() {
+    const response = await authFetch('/api/cv/profile')
+    if (!response.ok) return
+    setProfile(await response.json())
   }
 
   async function createWatchlist(event) {
@@ -168,6 +186,7 @@ export default function DashboardPage({ onNavigate }) {
 
   const trackedCount = applications.length
   const activeWatchlists = watchlists.filter((watchlist) => watchlist.active).length
+  const favoriteCompanies = companyPortals.filter((portal) => portal.favorite)
   const interviewCount = applications.filter((app) => app.status === 'interview').length
   const nextReviewCard = applications.find((app) => app.status === 'saved') || applications[0] || null
 
@@ -247,8 +266,8 @@ export default function DashboardPage({ onNavigate }) {
               <strong>{board.find((column) => column.key === 'saved')?.items.length || 0}</strong>
             </article>
             <article className="summary-card tone-yellow fade-stagger" style={{ '--index': 4 }}>
-              <span>Runs planifies</span>
-              <strong>{watchlists.length}</strong>
+              <span>Favoris jobs</span>
+              <strong>{favorites.length}</strong>
             </article>
           </div>
         </aside>
@@ -298,10 +317,10 @@ export default function DashboardPage({ onNavigate }) {
           <section className="panel-shell fade-stagger" style={{ '--index': 6 }}>
             <div className="panel-head">
               <div>
-                <p className="eyebrow">CV studio</p>
-                <h2>Base moderncv</h2>
+                <p className="eyebrow">Profil candidat</p>
+                <h2>Base CV + portfolio</h2>
               </div>
-              <p className="panel-note">Point de depart pour preparer plusieurs variantes de CV selon le poste vise.</p>
+              <p className="panel-note">Point de depart pour centraliser ton CV master, ton portfolio et tes versions ciblees.</p>
             </div>
 
             <div className="template-grid">
@@ -319,7 +338,7 @@ export default function DashboardPage({ onNavigate }) {
                       Ouvrir le repo
                     </a>
                     <button className="text-action" onClick={() => onNavigate('cv')}>
-                      Ouvrir CV Studio
+                      Ouvrir le profil
                     </button>
                   </div>
                 </article>
@@ -330,6 +349,88 @@ export default function DashboardPage({ onNavigate }) {
 
         <div className="dashboard-side-column">
           <section className="panel-shell fade-stagger" style={{ '--index': 7 }}>
+            <div className="panel-head">
+              <div>
+                <p className="eyebrow">Readiness</p>
+                <h2>Etat du profil</h2>
+              </div>
+            </div>
+
+            <div className="candidate-brief-card">
+              <p className="eyebrow">Lecture rapide</p>
+              <h3>{profile?.application_plan?.readiness_score ?? 0}% pret</h3>
+              <p>{profile?.candidate_brief?.summary || 'Complete ton profil candidat pour faire remonter les bons signaux.'}</p>
+              <div className="coach-chip-row">
+                <span className="inline-badge">{profile?.target_roles?.length || 0} role(s)</span>
+                <span className="inline-badge">{profile?.projects?.length || 0} projet(s)</span>
+                <span className="inline-badge">{profile?.student_guidance?.story_starters?.length || 0} stories</span>
+              </div>
+              <button className="text-action" onClick={() => onNavigate('cv')}>
+                Ouvrir le profil candidat
+              </button>
+              <button className="text-action" onClick={() => onNavigate('interview')}>
+                Lancer l'interview lab
+              </button>
+              <button className="text-action" onClick={() => onNavigate('ops')}>
+                Ouvrir career ops
+              </button>
+            </div>
+          </section>
+
+          <section className="panel-shell fade-stagger" style={{ '--index': 8 }}>
+            <div className="panel-head">
+              <div>
+                <p className="eyebrow">Favoris</p>
+                <h2>Priorites du moment</h2>
+              </div>
+            </div>
+
+            <div className="watchlist-stack">
+              <article className="watchlist-card">
+                <div className="watchlist-head">
+                  <div>
+                    <h3>Jobs favoris</h3>
+                    <p>{favorites.length} annonce(s) en shortlist</p>
+                  </div>
+                </div>
+                <div className="watchlist-meta">
+                  {favorites.slice(0, 3).map((favorite) => (
+                    <span key={favorite.id} className="inline-badge">
+                      {favorite.company_name || 'Entreprise'} - {favorite.job_title || 'Role'}
+                    </span>
+                  ))}
+                </div>
+                <div className="watchlist-actions">
+                  <button className="text-action" onClick={() => onNavigate('ops')}>
+                    Ouvrir les favoris
+                  </button>
+                </div>
+              </article>
+
+              <article className="watchlist-card">
+                <div className="watchlist-head">
+                  <div>
+                    <h3>Societes suivies</h3>
+                    <p>{favoriteCompanies.length} favorite(s) et {companyPortals.length} veille(s) au total</p>
+                  </div>
+                </div>
+                <div className="watchlist-meta">
+                  {favoriteCompanies.slice(0, 4).map((portal) => (
+                    <span key={portal.id} className="inline-badge">
+                      {portal.company_name}
+                    </span>
+                  ))}
+                </div>
+                <div className="watchlist-actions">
+                  <button className="text-action" onClick={() => onNavigate('ops')}>
+                    Ouvrir la veille societe
+                  </button>
+                </div>
+              </article>
+            </div>
+          </section>
+
+          <section className="panel-shell fade-stagger" style={{ '--index': 9 }}>
             <div className="panel-head">
               <div>
                 <p className="eyebrow">Veille</p>
@@ -380,7 +481,7 @@ export default function DashboardPage({ onNavigate }) {
             </form>
           </section>
 
-          <section className="panel-shell fade-stagger" style={{ '--index': 8 }}>
+          <section className="panel-shell fade-stagger" style={{ '--index': 10 }}>
             <div className="panel-head">
               <div>
                 <p className="eyebrow">Runs planifies</p>

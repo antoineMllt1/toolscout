@@ -4,7 +4,10 @@ import re
 import unicodedata
 import uuid
 
-from normalization import build_normalized_result
+try:
+    from normalization import build_normalized_result
+except ModuleNotFoundError:
+    from backend.normalization import build_normalized_result
 
 
 CV_TEMPLATE_LIBRARY = [
@@ -61,6 +64,11 @@ DEFAULT_CV_PROFILE = {
     "website": "",
     "linkedin": "",
     "github": "",
+    "target_roles": [],
+    "cv_text": "",
+    "portfolio_url": "",
+    "portfolio_snapshot": {},
+    "portfolio_last_scraped_at": "",
     "summary": "",
     "skills": [],
     "languages": [],
@@ -147,6 +155,9 @@ def sanitize_cv_profile(payload: dict, user: dict | None = None) -> dict:
         "website": sanitize_line(base.get("website"), 180),
         "linkedin": sanitize_line(base.get("linkedin"), 180),
         "github": sanitize_line(base.get("github"), 180),
+        "target_roles": sanitize_string_list(base.get("target_roles"), max_items=10, max_length=80),
+        "cv_text": sanitize_block(base.get("cv_text"), 16000),
+        "portfolio_url": sanitize_line(base.get("portfolio_url"), 220),
         "summary": sanitize_block(base.get("summary"), 900),
         "skills": sanitize_string_list(base.get("skills"), max_items=40, max_length=80),
         "languages": sanitize_string_list(base.get("languages"), max_items=16, max_length=80),

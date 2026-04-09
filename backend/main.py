@@ -13,6 +13,7 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 import aiosqlite
+import requests
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse, PlainTextResponse
@@ -38,6 +39,25 @@ from cv_engine import (
     sanitize_cv_profile,
 )
 from normalization import build_normalized_result, match_role_targets
+from career_ops_fit import (
+    build_company_research,
+    diff_company_portal_results,
+    evaluate_project_fit,
+    evaluate_training_fit,
+    scan_company_portal,
+    story_bank_suggestions,
+    tracker_status_label,
+    tracker_status_meta,
+)
+from portfolio_ingest import (
+    build_application_plan,
+    PortfolioImportError,
+    build_candidate_brief,
+    build_interview_prep,
+    build_student_guidance,
+    merge_portfolio_into_profile,
+    scrape_portfolio,
+)
 from scrapers.wttj import WTTJScraper
 from scrapers.indeed import IndeedScraper
 from scrapers.jobteaser import JobteaserScraper
@@ -45,6 +65,7 @@ from scrapers.linkedin import LinkedInScraper
 
 logger = logging.getLogger("toolscout.app")
 ACTIVE_WATCHLIST_RUNS: set[int] = set()
+ACTIVE_COMPANY_PORTAL_SCANS: set[int] = set()
 WATCHLIST_CADENCES = {
     "daily": timedelta(days=1),
     "every_3_days": timedelta(days=3),
@@ -69,6 +90,8 @@ async def lifespan(app: FastAPI):
     logger.info("startup: cookie refresh loop started")
     asyncio.create_task(watchlist_scheduler_loop())
     logger.info("startup: watchlist scheduler loop started")
+    asyncio.create_task(company_portal_scheduler_loop())
+    logger.info("startup: company portal scheduler loop started")
     yield
 
 
@@ -145,6 +168,9 @@ class CvProfileBody(BaseModel):
     website: str = ""
     linkedin: str = ""
     github: str = ""
+    target_roles: list[str] = []
+    cv_text: str = ""
+    portfolio_url: str = ""
     summary: str = ""
     skills: list[str] = []
     languages: list[str] = []
@@ -158,6 +184,83 @@ class CvDraftBody(BaseModel):
     template_slug: str = "moderncv-classic"
     application_id: Optional[int] = None
     result_id: Optional[int] = None
+
+
+class PortfolioImportBody(BaseModel):
+    portfolio_url: str
+
+
+class StoryBankBody(BaseModel):
+    title: str
+    situation: str = ""
+    task: str = ""
+    action: str = ""
+    result: str = ""
+    reflection: str = ""
+    tags: list[str] = []
+    source_kind: str = ""
+    source_id: Optional[int] = None
+
+
+class QueueItemBody(BaseModel):
+    label: str
+    url: str = ""
+    company_name: str = ""
+    role_hint: str = ""
+    status: str = "pending"
+    notes: str = ""
+
+
+class QueueItemUpdate(BaseModel):
+    status: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class CompanyPortalBody(BaseModel):
+    company_name: str
+    careers_url: str
+    active: bool = True
+    favorite: bool = False
+    notes: str = ""
+    tags: list[str] = []
+    cadence: str = "weekly"
+
+
+class CompanyPortalUpdate(BaseModel):
+    company_name: Optional[str] = None
+    careers_url: Optional[str] = None
+    active: Optional[bool] = None
+    favorite: Optional[bool] = None
+    notes: Optional[str] = None
+    tags: Optional[list[str]] = None
+    cadence: Optional[str] = None
+
+
+class CompanyResearchBody(BaseModel):
+    company_name: str
+    source_url: str
+    role_title: str = ""
+
+
+class CareerEvaluationBody(BaseModel):
+    title: str
+    input_text: str
+
+
+class FavoriteJobBody(BaseModel):
+    search_result_id: Optional[int] = None
+    job_url: str
+    job_title: str = ""
+    company_name: str = ""
+    source: str = ""
+    location: str = ""
+    contract_type: str = ""
+    notes: str = ""
+    payload: dict = {}
+
+
+class FavoriteJobUpdate(BaseModel):
+    notes: Optional[str] = None
 
 
 # ── Auth dependency ───────────────────────────────────────────────────────────
@@ -329,6 +432,7 @@ def _parse_app(r: dict) -> dict:
         r["tool_context"] = json.loads(r.get("tool_context") or "[]")
     except Exception:
         r["tool_context"] = []
+    r["status_label"] = tracker_status_label(r.get("status") or "")
     r["normalized"] = build_normalized_result(r)
     return r
 
@@ -421,6 +525,47 @@ def _parse_watchlist_run_row(row: dict) -> dict:
     }
 
 
+def _serialize_company_portal_payload(payload: dict, existing: dict | None = None) -> dict:
+    now = datetime.utcnow()
+    safe_cadence = sanitize_line(payload.get("cadence") or (existing or {}).get("cadence") or "weekly", 32)
+    if safe_cadence not in WATCHLIST_CADENCES:
+        safe_cadence = "weekly"
+
+    active = bool(payload.get("active") if payload.get("active") is not None else bool((existing or {}).get("active", 1)))
+    next_scan_at = (existing or {}).get("next_scan_at")
+    cadence_changed = existing is not None and safe_cadence != existing.get("cadence")
+    became_active = existing is not None and active and not bool(existing.get("active", 1))
+
+    if active:
+        if existing is None or cadence_changed or became_active or not next_scan_at:
+            next_scan_at = now.isoformat()
+    else:
+        next_scan_at = None
+
+    return {
+        "company_name": sanitize_line(payload.get("company_name") if payload.get("company_name") is not None else (existing or {}).get("company_name"), 120),
+        "careers_url": sanitize_line(payload.get("careers_url") if payload.get("careers_url") is not None else (existing or {}).get("careers_url"), 240),
+        "active": 1 if active else 0,
+        "favorite": 1 if bool(payload.get("favorite") if payload.get("favorite") is not None else bool((existing or {}).get("favorite", 0))) else 0,
+        "notes": sanitize_block(payload.get("notes") if payload.get("notes") is not None else (existing or {}).get("notes"), 800),
+        "tags_json": json.dumps(_sanitize_string_list(payload.get("tags") if payload.get("tags") is not None else _json_value((existing or {}).get("tags_json"), [])), ensure_ascii=False),
+        "cadence": safe_cadence,
+        "next_scan_at": next_scan_at,
+        "updated_at": now.isoformat(),
+    }
+
+
+def _score_portal_seed_url(url: str) -> int:
+    normalized = (url or "").lower()
+    score = 0
+    if any(token in normalized for token in ["/careers", "/career", "/jobs", "/join-us"]):
+        score += 3
+    if any(token in normalized for token in ["/job/", "/jobs/", "/positions/", "/opening/"]):
+        score -= 1
+    score -= normalized.count("/")
+    return score
+
+
 # ── Search ──────────────────────────────────────────────────────────────────
 def _json_value(raw, fallback):
     try:
@@ -431,8 +576,13 @@ def _json_value(raw, fallback):
 
 def _parse_cv_profile_row(row: dict, user: dict | None = None) -> dict:
     if not row:
-        return default_cv_profile(user)
-    return {
+        profile = default_cv_profile(user)
+        profile["candidate_brief"] = build_candidate_brief(profile)
+        profile["student_guidance"] = build_student_guidance(profile)
+        profile["interview_prep"] = build_interview_prep(profile)
+        profile["application_plan"] = build_application_plan(profile)
+        return profile
+    profile = {
         "id": row["id"],
         "title": row.get("title") or "Main profile",
         "full_name": row.get("full_name") or "",
@@ -443,6 +593,11 @@ def _parse_cv_profile_row(row: dict, user: dict | None = None) -> dict:
         "website": row.get("website") or "",
         "linkedin": row.get("linkedin") or "",
         "github": row.get("github") or "",
+        "target_roles": _json_value(row.get("target_roles_json"), []),
+        "cv_text": row.get("cv_text") or "",
+        "portfolio_url": row.get("portfolio_url") or "",
+        "portfolio_snapshot": _json_value(row.get("portfolio_snapshot_json"), {}),
+        "portfolio_last_scraped_at": row.get("portfolio_last_scraped_at"),
         "summary": row.get("summary") or "",
         "skills": _json_value(row.get("skills_json"), []),
         "languages": _json_value(row.get("languages_json"), []),
@@ -453,6 +608,11 @@ def _parse_cv_profile_row(row: dict, user: dict | None = None) -> dict:
         "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"),
     }
+    profile["candidate_brief"] = build_candidate_brief(profile)
+    profile["student_guidance"] = build_student_guidance(profile)
+    profile["interview_prep"] = build_interview_prep(profile)
+    profile["application_plan"] = build_application_plan(profile)
+    return profile
 
 
 def _parse_cv_draft_row(row: dict) -> dict:
@@ -469,6 +629,117 @@ def _parse_cv_draft_row(row: dict) -> dict:
         "selected_payload": _json_value(row.get("selected_payload_json"), {}),
         "latex_source": row.get("latex_source") or "",
         "prompt_payload": _json_value(row.get("prompt_payload_json"), {}),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+    }
+
+
+def _parse_story_bank_row(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "title": row.get("title") or "",
+        "situation": row.get("situation") or "",
+        "task": row.get("task") or "",
+        "action": row.get("action") or "",
+        "result": row.get("result") or "",
+        "reflection": row.get("reflection") or "",
+        "tags": _json_value(row.get("tags_json"), []),
+        "source_kind": row.get("source_kind") or "",
+        "source_id": row.get("source_id"),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+    }
+
+
+def _parse_queue_item_row(row: dict) -> dict:
+    status = row.get("status") or "pending"
+    return {
+        "id": row["id"],
+        "label": row.get("label") or "",
+        "url": row.get("url") or "",
+        "company_name": row.get("company_name") or "",
+        "role_hint": row.get("role_hint") or "",
+        "status": status,
+        "status_label": tracker_status_label(status) if status in {"saved", "applied", "interview", "offer", "rejected"} else status.title(),
+        "notes": row.get("notes") or "",
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+    }
+
+
+def _parse_company_portal_row(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "company_name": row.get("company_name") or "",
+        "careers_url": row.get("careers_url") or "",
+        "active": bool(row.get("active", 1)),
+        "favorite": bool(row.get("favorite", 0)),
+        "notes": row.get("notes") or "",
+        "tags": _json_value(row.get("tags_json"), []),
+        "cadence": row.get("cadence") or "weekly",
+        "last_scan_at": row.get("last_scan_at"),
+        "next_scan_at": row.get("next_scan_at"),
+        "last_result": _json_value(row.get("last_result_json"), {}),
+        "last_delta": _json_value(row.get("last_delta_json"), {}),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+    }
+
+
+def _parse_company_portal_run_row(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "portal_id": row.get("portal_id"),
+        "company_name": row.get("company_name") or "",
+        "status": row.get("status") or "running",
+        "jobs_found": row.get("jobs_found", 0),
+        "new_jobs": row.get("new_jobs", 0),
+        "removed_jobs": row.get("removed_jobs", 0),
+        "summary": _json_value(row.get("summary_json"), {}),
+        "started_at": row.get("started_at"),
+        "completed_at": row.get("completed_at"),
+        "error": row.get("error") or "",
+    }
+
+
+def _parse_company_research_row(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "company_name": row.get("company_name") or "",
+        "role_title": row.get("role_title") or "",
+        "source_url": row.get("source_url") or "",
+        "summary": row.get("summary") or "",
+        "culture_signals": _json_value(row.get("culture_json"), []),
+        "product_signals": _json_value(row.get("product_json"), []),
+        "risks": _json_value(row.get("risks_json"), []),
+        "headings": _json_value(row.get("headings_json"), []),
+        "created_at": row.get("created_at"),
+    }
+
+
+def _parse_career_evaluation_row(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "kind": row.get("kind") or "",
+        "title": row.get("title") or "",
+        "input_text": row.get("input_text") or "",
+        "output": _json_value(row.get("output_json"), {}),
+        "created_at": row.get("created_at"),
+    }
+
+
+def _parse_favorite_job_row(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "search_result_id": row.get("search_result_id"),
+        "job_url": row.get("job_url") or "",
+        "job_title": row.get("job_title") or "",
+        "company_name": row.get("company_name") or "",
+        "source": row.get("source") or "",
+        "location": row.get("location") or "",
+        "contract_type": row.get("contract_type") or "",
+        "notes": row.get("notes") or "",
+        "payload": _json_value(row.get("payload_json"), {}),
         "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"),
     }
@@ -493,6 +764,85 @@ async def _fetch_cv_profile(user_id: int) -> tuple[dict | None, dict]:
     return (dict(row) if row else None, user)
 
 
+async def _upsert_cv_profile(
+    user_id: int,
+    user: dict,
+    payload: dict,
+    existing_row: dict | None = None,
+    portfolio_snapshot: dict | None = None,
+    portfolio_last_scraped_at: str | None = None,
+):
+    profile = sanitize_cv_profile(payload, user)
+    existing_snapshot = _json_value((existing_row or {}).get("portfolio_snapshot_json"), {})
+    snapshot = portfolio_snapshot if portfolio_snapshot is not None else existing_snapshot
+    existing_scraped_at = (existing_row or {}).get("portfolio_last_scraped_at")
+    scraped_at = portfolio_last_scraped_at if portfolio_last_scraped_at is not None else existing_scraped_at
+    now = datetime.utcnow().isoformat()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute(
+            """INSERT INTO cv_profiles
+               (user_id, title, full_name, headline, email, phone, location, website, linkedin, github,
+                target_roles_json, cv_text, portfolio_url, portfolio_snapshot_json, portfolio_last_scraped_at,
+                summary, skills_json, languages_json, certifications_json, education_json, experience_json,
+                projects_json, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET
+                 title = excluded.title,
+                 full_name = excluded.full_name,
+                 headline = excluded.headline,
+                 email = excluded.email,
+                 phone = excluded.phone,
+                 location = excluded.location,
+                 website = excluded.website,
+                 linkedin = excluded.linkedin,
+                 github = excluded.github,
+                 target_roles_json = excluded.target_roles_json,
+                 cv_text = excluded.cv_text,
+                 portfolio_url = excluded.portfolio_url,
+                 portfolio_snapshot_json = excluded.portfolio_snapshot_json,
+                 portfolio_last_scraped_at = excluded.portfolio_last_scraped_at,
+                 summary = excluded.summary,
+                 skills_json = excluded.skills_json,
+                 languages_json = excluded.languages_json,
+                 certifications_json = excluded.certifications_json,
+                 education_json = excluded.education_json,
+                 experience_json = excluded.experience_json,
+                 projects_json = excluded.projects_json,
+                 updated_at = excluded.updated_at""",
+            (
+                user_id,
+                profile["title"],
+                profile["full_name"],
+                profile["headline"],
+                profile["email"],
+                profile["phone"],
+                profile["location"],
+                profile["website"],
+                profile["linkedin"],
+                profile["github"],
+                dumps_json(profile["target_roles"]),
+                profile["cv_text"],
+                profile["portfolio_url"],
+                dumps_json(snapshot),
+                scraped_at,
+                profile["summary"],
+                dumps_json(profile["skills"]),
+                dumps_json(profile["languages"]),
+                dumps_json(profile["certifications"]),
+                dumps_json(profile["education"]),
+                dumps_json(profile["experience"]),
+                dumps_json(profile["projects"]),
+                now,
+            ),
+        )
+        await db.commit()
+        cur = await db.execute("SELECT * FROM cv_profiles WHERE user_id = ?", (user_id,))
+        row = await cur.fetchone()
+    return dict(row) if row else None
+
+
 async def _load_cv_target(body: CvDraftBody, user_id: int) -> tuple[str, dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -514,6 +864,80 @@ async def _load_cv_target(body: CvDraftBody, user_id: int) -> tuple[str, dict]:
             return "result", _parse_result_row(dict(row))
 
     raise HTTPException(400, "application_id or result_id is required")
+
+
+async def _run_company_portal_scan_by_id(portal_id: int) -> dict | None:
+    run_id = None
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT * FROM company_portals WHERE id = ?", (portal_id,))
+            row = await cur.fetchone()
+            if not row:
+                return None
+            portal = dict(row)
+
+            run_cur = await db.execute(
+                """INSERT INTO company_portal_runs (portal_id, status)
+                   VALUES (?, 'running')""",
+                (portal_id,),
+            )
+            await db.commit()
+            run_id = run_cur.lastrowid
+
+        previous_result = _json_value(portal.get("last_result_json"), {})
+        result = scan_company_portal(portal["company_name"], portal["careers_url"])
+        delta = diff_company_portal_results(previous_result, result)
+        now = datetime.utcnow()
+        next_scan_at = _next_watchlist_run(now, portal.get("cadence") or "weekly") if portal.get("active") else None
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute(
+                """UPDATE company_portals
+                   SET last_scan_at = ?, next_scan_at = ?, last_result_json = ?, last_delta_json = ?, updated_at = ?
+                   WHERE id = ?""",
+                (
+                    result["scanned_at"],
+                    next_scan_at,
+                    dumps_json(result),
+                    dumps_json(delta),
+                    now.isoformat(),
+                    portal_id,
+                ),
+            )
+            if run_id is not None:
+                await db.execute(
+                    """UPDATE company_portal_runs
+                       SET status = 'completed', jobs_found = ?, new_jobs = ?, removed_jobs = ?,
+                           summary_json = ?, completed_at = ?
+                       WHERE id = ?""",
+                    (
+                        delta["jobs_found_count"],
+                        delta["new_jobs_count"],
+                        delta["removed_jobs_count"],
+                        dumps_json({"result": result, "delta": delta}),
+                        now.isoformat(),
+                        run_id,
+                    ),
+                )
+            await db.commit()
+            cur = await db.execute("SELECT * FROM company_portals WHERE id = ?", (portal_id,))
+            updated = await cur.fetchone()
+        return _parse_company_portal_row(dict(updated)) if updated else None
+    except Exception as error:
+        if run_id is not None:
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    """UPDATE company_portal_runs
+                       SET status = 'failed', error = ?, completed_at = ?
+                       WHERE id = ?""",
+                    (str(error), datetime.utcnow().isoformat(), run_id),
+                )
+                await db.commit()
+        raise
+    finally:
+        ACTIVE_COMPANY_PORTAL_SCANS.discard(portal_id)
 
 
 @app.post("/api/search")
@@ -623,61 +1047,46 @@ async def get_cv_profile(current_user=Depends(get_current_user)):
 @app.put("/api/cv/profile")
 async def save_cv_profile(body: CvProfileBody, current_user=Depends(get_current_user)):
     payload = body.model_dump() if hasattr(body, "model_dump") else body.dict()
-    _, user = await _fetch_cv_profile(current_user["id"])
-    profile = sanitize_cv_profile(payload, user)
-    now = datetime.utcnow().isoformat()
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        await db.execute(
-            """INSERT INTO cv_profiles
-               (user_id, title, full_name, headline, email, phone, location, website, linkedin, github, summary,
-                skills_json, languages_json, certifications_json, education_json, experience_json, projects_json,
-                updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(user_id) DO UPDATE SET
-                 title = excluded.title,
-                 full_name = excluded.full_name,
-                 headline = excluded.headline,
-                 email = excluded.email,
-                 phone = excluded.phone,
-                 location = excluded.location,
-                 website = excluded.website,
-                 linkedin = excluded.linkedin,
-                 github = excluded.github,
-                 summary = excluded.summary,
-                 skills_json = excluded.skills_json,
-                 languages_json = excluded.languages_json,
-                 certifications_json = excluded.certifications_json,
-                 education_json = excluded.education_json,
-                 experience_json = excluded.experience_json,
-                 projects_json = excluded.projects_json,
-                 updated_at = excluded.updated_at""",
-            (
-                current_user["id"],
-                profile["title"],
-                profile["full_name"],
-                profile["headline"],
-                profile["email"],
-                profile["phone"],
-                profile["location"],
-                profile["website"],
-                profile["linkedin"],
-                profile["github"],
-                profile["summary"],
-                dumps_json(profile["skills"]),
-                dumps_json(profile["languages"]),
-                dumps_json(profile["certifications"]),
-                dumps_json(profile["education"]),
-                dumps_json(profile["experience"]),
-                dumps_json(profile["projects"]),
-                now,
-            ),
-        )
-        await db.commit()
-        cur = await db.execute("SELECT * FROM cv_profiles WHERE user_id = ?", (current_user["id"],))
-        row = await cur.fetchone()
+    existing_row, user = await _fetch_cv_profile(current_user["id"])
+    row = await _upsert_cv_profile(
+        current_user["id"],
+        user,
+        payload,
+        existing_row=existing_row,
+    )
     return _parse_cv_profile_row(dict(row), user)
+
+
+@app.post("/api/cv/portfolio/import")
+async def import_cv_portfolio(body: PortfolioImportBody, current_user=Depends(get_current_user)):
+    existing_row, user = await _fetch_cv_profile(current_user["id"])
+    current_profile = _parse_cv_profile_row(existing_row, user)
+    try:
+        snapshot = scrape_portfolio(body.portfolio_url)
+    except PortfolioImportError as error:
+        raise HTTPException(400, str(error))
+    except requests.RequestException as error:
+        raise HTTPException(502, f"Portfolio fetch failed: {error}")
+
+    merged_profile = merge_portfolio_into_profile(current_profile, snapshot)
+    row = await _upsert_cv_profile(
+        current_user["id"],
+        user,
+        merged_profile,
+        existing_row=existing_row,
+        portfolio_snapshot=snapshot,
+        portfolio_last_scraped_at=snapshot.get("captured_at"),
+    )
+    profile = _parse_cv_profile_row(row, user)
+    return {
+        "profile": profile,
+        "snapshot": snapshot,
+        "imported": {
+            "portfolio_url": snapshot.get("final_url") or body.portfolio_url,
+            "projects_found": len(snapshot.get("projects") or []),
+            "skills_found": len(snapshot.get("skills") or []),
+        },
+    }
 
 
 @app.get("/api/cv/drafts")
@@ -847,6 +1256,596 @@ async def generate_cv_draft(body: CvDraftBody, current_user=Depends(get_current_
         row_cur = await db.execute("SELECT * FROM cv_drafts WHERE id = ?", (draft_id,))
         row = await row_cur.fetchone()
     return _parse_cv_draft_row(dict(row))
+
+
+@app.get("/api/tracker/statuses")
+async def get_tracker_statuses():
+    return tracker_status_meta()
+
+
+@app.get("/api/story-bank")
+async def list_story_bank(current_user=Depends(get_current_user)):
+    profile_row, user = await _fetch_cv_profile(current_user["id"])
+    profile = _parse_cv_profile_row(profile_row, user)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM story_bank_entries WHERE user_id = ? ORDER BY updated_at DESC, created_at DESC",
+            (current_user["id"],),
+        )
+        rows = await cur.fetchall()
+    return {
+        "items": [_parse_story_bank_row(dict(row)) for row in rows],
+        "suggestions": story_bank_suggestions(profile),
+    }
+
+
+@app.post("/api/story-bank")
+async def create_story_bank_item(body: StoryBankBody, current_user=Depends(get_current_user)):
+    payload = body.model_dump() if hasattr(body, "model_dump") else body.dict()
+    now = datetime.utcnow().isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """INSERT INTO story_bank_entries
+               (user_id, title, situation, task, action, result, reflection, tags_json, source_kind, source_id, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                current_user["id"],
+                sanitize_line(payload.get("title"), 140),
+                sanitize_block(payload.get("situation"), 1200),
+                sanitize_block(payload.get("task"), 700),
+                sanitize_block(payload.get("action"), 1200),
+                sanitize_block(payload.get("result"), 900),
+                sanitize_block(payload.get("reflection"), 900),
+                dumps_json(sanitize_string_list(payload.get("tags"), max_items=8, max_length=50)),
+                sanitize_line(payload.get("source_kind"), 40),
+                payload.get("source_id"),
+                now,
+            ),
+        )
+        await db.commit()
+        cur = await db.execute("SELECT * FROM story_bank_entries WHERE id = ?", (cursor.lastrowid,))
+        row = await cur.fetchone()
+    return _parse_story_bank_row(dict(row))
+
+
+@app.put("/api/story-bank/{item_id}")
+async def update_story_bank_item(item_id: int, body: StoryBankBody, current_user=Depends(get_current_user)):
+    payload = body.model_dump() if hasattr(body, "model_dump") else body.dict()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute(
+            """UPDATE story_bank_entries
+               SET title = ?, situation = ?, task = ?, action = ?, result = ?, reflection = ?, tags_json = ?,
+                   source_kind = ?, source_id = ?, updated_at = ?
+               WHERE id = ? AND user_id = ?""",
+            (
+                sanitize_line(payload.get("title"), 140),
+                sanitize_block(payload.get("situation"), 1200),
+                sanitize_block(payload.get("task"), 700),
+                sanitize_block(payload.get("action"), 1200),
+                sanitize_block(payload.get("result"), 900),
+                sanitize_block(payload.get("reflection"), 900),
+                dumps_json(sanitize_string_list(payload.get("tags"), max_items=8, max_length=50)),
+                sanitize_line(payload.get("source_kind"), 40),
+                payload.get("source_id"),
+                datetime.utcnow().isoformat(),
+                item_id,
+                current_user["id"],
+            ),
+        )
+        await db.commit()
+        cur = await db.execute("SELECT * FROM story_bank_entries WHERE id = ? AND user_id = ?", (item_id, current_user["id"]))
+        row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "Story bank item not found")
+    return _parse_story_bank_row(dict(row))
+
+
+@app.delete("/api/story-bank/{item_id}")
+async def delete_story_bank_item(item_id: int, current_user=Depends(get_current_user)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM story_bank_entries WHERE id = ? AND user_id = ?", (item_id, current_user["id"]))
+        await db.commit()
+    return {"deleted": item_id}
+
+
+@app.get("/api/pipeline-queue")
+async def list_pipeline_queue(current_user=Depends(get_current_user)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM pipeline_queue_items WHERE user_id = ? ORDER BY created_at DESC",
+            (current_user["id"],),
+        )
+        rows = await cur.fetchall()
+    return [_parse_queue_item_row(dict(row)) for row in rows]
+
+
+@app.post("/api/pipeline-queue")
+async def create_pipeline_queue_item(body: QueueItemBody, current_user=Depends(get_current_user)):
+    payload = body.model_dump() if hasattr(body, "model_dump") else body.dict()
+    now = datetime.utcnow().isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """INSERT INTO pipeline_queue_items
+               (user_id, label, url, company_name, role_hint, status, notes, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                current_user["id"],
+                sanitize_line(payload.get("label"), 160),
+                sanitize_line(payload.get("url"), 240),
+                sanitize_line(payload.get("company_name"), 120),
+                sanitize_line(payload.get("role_hint"), 120),
+                sanitize_line(payload.get("status") or "pending", 40),
+                sanitize_block(payload.get("notes"), 800),
+                now,
+            ),
+        )
+        await db.commit()
+        cur = await db.execute("SELECT * FROM pipeline_queue_items WHERE id = ?", (cursor.lastrowid,))
+        row = await cur.fetchone()
+    return _parse_queue_item_row(dict(row))
+
+
+@app.put("/api/pipeline-queue/{item_id}")
+async def update_pipeline_queue_item(item_id: int, body: QueueItemUpdate, current_user=Depends(get_current_user)):
+    payload = body.model_dump() if hasattr(body, "model_dump") else body.dict()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM pipeline_queue_items WHERE id = ? AND user_id = ?", (item_id, current_user["id"]))
+        row = await cur.fetchone()
+        if not row:
+            raise HTTPException(404, "Queue item not found")
+        existing = dict(row)
+        next_status = sanitize_line(payload.get("status") if payload.get("status") is not None else existing.get("status"), 40)
+        next_notes = sanitize_block(payload.get("notes") if payload.get("notes") is not None else existing.get("notes"), 800)
+        await db.execute(
+            "UPDATE pipeline_queue_items SET status = ?, notes = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+            (next_status, next_notes, datetime.utcnow().isoformat(), item_id, current_user["id"]),
+        )
+        await db.commit()
+        cur = await db.execute("SELECT * FROM pipeline_queue_items WHERE id = ? AND user_id = ?", (item_id, current_user["id"]))
+        row = await cur.fetchone()
+    return _parse_queue_item_row(dict(row))
+
+
+@app.delete("/api/pipeline-queue/{item_id}")
+async def delete_pipeline_queue_item(item_id: int, current_user=Depends(get_current_user)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM pipeline_queue_items WHERE id = ? AND user_id = ?", (item_id, current_user["id"]))
+        await db.commit()
+    return {"deleted": item_id}
+
+
+@app.get("/api/company-portals")
+async def list_company_portals(current_user=Depends(get_current_user)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM company_portals WHERE user_id = ? ORDER BY favorite DESC, updated_at DESC",
+            (current_user["id"],),
+        )
+        rows = await cur.fetchall()
+    return [_parse_company_portal_row(dict(row)) for row in rows]
+
+
+@app.post("/api/company-portals")
+async def create_company_portal(body: CompanyPortalBody, current_user=Depends(get_current_user)):
+    payload = body.model_dump(exclude_unset=True) if hasattr(body, "model_dump") else body.dict(exclude_unset=True)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        existing_cur = await db.execute(
+            """SELECT * FROM company_portals
+               WHERE user_id = ? AND (
+                   lower(company_name) = lower(?)
+                   OR lower(careers_url) = lower(?)
+               )
+               ORDER BY favorite DESC, updated_at DESC
+               LIMIT 1""",
+            (
+                current_user["id"],
+                sanitize_line(payload.get("company_name"), 120),
+                sanitize_line(payload.get("careers_url"), 240),
+            ),
+        )
+        existing = await existing_cur.fetchone()
+        serialized = _serialize_company_portal_payload(payload, dict(existing) if existing else None)
+
+        if not serialized["company_name"] or not serialized["careers_url"]:
+            raise HTTPException(400, "company_name and careers_url are required")
+
+        if existing:
+            existing_url = existing["careers_url"] or ""
+            incoming_url = serialized["careers_url"] or ""
+            if existing_url and incoming_url and existing_url.lower() != incoming_url.lower():
+                if _score_portal_seed_url(existing_url) >= _score_portal_seed_url(incoming_url):
+                    serialized["careers_url"] = existing_url
+            await db.execute(
+                """UPDATE company_portals
+                   SET company_name = ?, careers_url = ?, active = ?, favorite = ?, notes = ?, tags_json = ?,
+                       cadence = ?, next_scan_at = ?, updated_at = ?
+                   WHERE id = ? AND user_id = ?""",
+                (
+                    serialized["company_name"],
+                    serialized["careers_url"],
+                    serialized["active"],
+                    serialized["favorite"],
+                    serialized["notes"],
+                    serialized["tags_json"],
+                    serialized["cadence"],
+                    serialized["next_scan_at"],
+                    serialized["updated_at"],
+                    existing["id"],
+                    current_user["id"],
+                ),
+            )
+            await db.commit()
+            cur = await db.execute("SELECT * FROM company_portals WHERE id = ?", (existing["id"],))
+        else:
+            cursor = await db.execute(
+                """INSERT INTO company_portals
+                   (user_id, company_name, careers_url, active, favorite, notes, tags_json, cadence, next_scan_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    current_user["id"],
+                    serialized["company_name"],
+                    serialized["careers_url"],
+                    serialized["active"],
+                    serialized["favorite"],
+                    serialized["notes"],
+                    serialized["tags_json"],
+                    serialized["cadence"],
+                    serialized["next_scan_at"],
+                    serialized["updated_at"],
+                ),
+            )
+            await db.commit()
+            cur = await db.execute("SELECT * FROM company_portals WHERE id = ?", (cursor.lastrowid,))
+        row = await cur.fetchone()
+    return _parse_company_portal_row(dict(row))
+
+
+@app.put("/api/company-portals/{portal_id}")
+async def update_company_portal(portal_id: int, body: CompanyPortalUpdate, current_user=Depends(get_current_user)):
+    payload = body.model_dump(exclude_none=True) if hasattr(body, "model_dump") else body.dict(exclude_none=True)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM company_portals WHERE id = ? AND user_id = ?", (portal_id, current_user["id"]))
+        existing = await cur.fetchone()
+        if not existing:
+            raise HTTPException(404, "Company portal not found")
+
+        serialized = _serialize_company_portal_payload(payload, dict(existing))
+        await db.execute(
+            """UPDATE company_portals
+               SET company_name = ?, careers_url = ?, active = ?, favorite = ?, notes = ?, tags_json = ?,
+                   cadence = ?, next_scan_at = ?, updated_at = ?
+               WHERE id = ? AND user_id = ?""",
+            (
+                serialized["company_name"],
+                serialized["careers_url"],
+                serialized["active"],
+                serialized["favorite"],
+                serialized["notes"],
+                serialized["tags_json"],
+                serialized["cadence"],
+                serialized["next_scan_at"],
+                serialized["updated_at"],
+                portal_id,
+                current_user["id"],
+            ),
+        )
+        await db.commit()
+        cur = await db.execute("SELECT * FROM company_portals WHERE id = ? AND user_id = ?", (portal_id, current_user["id"]))
+        row = await cur.fetchone()
+    return _parse_company_portal_row(dict(row))
+
+
+@app.post("/api/company-portals/{portal_id}/scan")
+async def run_company_portal_scan(portal_id: int, current_user=Depends(get_current_user)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM company_portals WHERE id = ? AND user_id = ?", (portal_id, current_user["id"]))
+        row = await cur.fetchone()
+        if not row:
+            raise HTTPException(404, "Company portal not found")
+    if portal_id in ACTIVE_COMPANY_PORTAL_SCANS:
+        raise HTTPException(409, "Company portal scan already running")
+
+    ACTIVE_COMPANY_PORTAL_SCANS.add(portal_id)
+    try:
+        updated = await _run_company_portal_scan_by_id(portal_id)
+    except requests.RequestException as error:
+        raise HTTPException(502, f"Portal scan failed: {error}")
+    if not updated:
+        raise HTTPException(404, "Company portal not found")
+    return updated
+
+
+@app.get("/api/company-portals/{portal_id}/runs")
+async def list_company_portal_runs(portal_id: int, current_user=Depends(get_current_user)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM company_portals WHERE id = ? AND user_id = ?", (portal_id, current_user["id"]))
+        portal = await cur.fetchone()
+        if not portal:
+            raise HTTPException(404, "Company portal not found")
+        runs_cur = await db.execute(
+            """SELECT runs.*, portals.company_name
+               FROM company_portal_runs runs
+               JOIN company_portals portals ON portals.id = runs.portal_id
+               WHERE runs.portal_id = ?
+               ORDER BY runs.started_at DESC
+               LIMIT 20""",
+            (portal_id,),
+        )
+        runs = await runs_cur.fetchall()
+    return [_parse_company_portal_run_row(dict(run)) for run in runs]
+
+
+@app.delete("/api/company-portals/{portal_id}")
+async def delete_company_portal(portal_id: int, current_user=Depends(get_current_user)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM company_portals WHERE id = ? AND user_id = ?", (portal_id, current_user["id"]))
+        await db.commit()
+    ACTIVE_COMPANY_PORTAL_SCANS.discard(portal_id)
+    return {"deleted": portal_id}
+
+
+@app.get("/api/company-research")
+async def list_company_research(current_user=Depends(get_current_user)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM company_research_reports WHERE user_id = ? ORDER BY created_at DESC LIMIT 20",
+            (current_user["id"],),
+        )
+        rows = await cur.fetchall()
+    return [_parse_company_research_row(dict(row)) for row in rows]
+
+
+@app.post("/api/company-research/generate")
+async def generate_company_research(body: CompanyResearchBody, current_user=Depends(get_current_user)):
+    payload = body.model_dump() if hasattr(body, "model_dump") else body.dict()
+    try:
+        result = build_company_research(payload.get("company_name"), payload.get("source_url"), payload.get("role_title"))
+    except requests.RequestException as error:
+        raise HTTPException(502, f"Research fetch failed: {error}")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """INSERT INTO company_research_reports
+               (user_id, company_name, role_title, source_url, summary, culture_json, product_json, risks_json, headings_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                current_user["id"],
+                result["company_name"],
+                result["role_title"],
+                result["source_url"],
+                result["summary"],
+                dumps_json(result["culture_signals"]),
+                dumps_json(result["product_signals"]),
+                dumps_json(result["risks"]),
+                dumps_json(result["headings"]),
+            ),
+        )
+        await db.commit()
+        cur = await db.execute("SELECT * FROM company_research_reports WHERE id = ?", (cursor.lastrowid,))
+        row = await cur.fetchone()
+    return _parse_company_research_row(dict(row))
+
+
+@app.post("/api/evaluations/training")
+async def create_training_evaluation(body: CareerEvaluationBody, current_user=Depends(get_current_user)):
+    profile_row, user = await _fetch_cv_profile(current_user["id"])
+    profile = _parse_cv_profile_row(profile_row, user)
+    result = evaluate_training_fit(profile, body.input_text)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """INSERT INTO career_evaluations (user_id, kind, title, input_text, output_json)
+               VALUES (?, 'training', ?, ?, ?)""",
+            (current_user["id"], sanitize_line(body.title, 140), sanitize_block(body.input_text, 900), dumps_json(result)),
+        )
+        await db.commit()
+        cur = await db.execute("SELECT * FROM career_evaluations WHERE id = ?", (cursor.lastrowid,))
+        row = await cur.fetchone()
+    return _parse_career_evaluation_row(dict(row))
+
+
+@app.post("/api/evaluations/project")
+async def create_project_evaluation(body: CareerEvaluationBody, current_user=Depends(get_current_user)):
+    profile_row, user = await _fetch_cv_profile(current_user["id"])
+    profile = _parse_cv_profile_row(profile_row, user)
+    result = evaluate_project_fit(profile, body.input_text)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """INSERT INTO career_evaluations (user_id, kind, title, input_text, output_json)
+               VALUES (?, 'project', ?, ?, ?)""",
+            (current_user["id"], sanitize_line(body.title, 140), sanitize_block(body.input_text, 900), dumps_json(result)),
+        )
+        await db.commit()
+        cur = await db.execute("SELECT * FROM career_evaluations WHERE id = ?", (cursor.lastrowid,))
+        row = await cur.fetchone()
+    return _parse_career_evaluation_row(dict(row))
+
+
+@app.get("/api/evaluations/{kind}")
+async def list_evaluations(kind: str, current_user=Depends(get_current_user)):
+    safe_kind = sanitize_line(kind, 40)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM career_evaluations WHERE user_id = ? AND kind = ? ORDER BY created_at DESC LIMIT 20",
+            (current_user["id"], safe_kind),
+        )
+        rows = await cur.fetchall()
+    return [_parse_career_evaluation_row(dict(row)) for row in rows]
+
+
+@app.get("/api/favorites/jobs")
+async def list_favorite_jobs(current_user=Depends(get_current_user)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM favorite_jobs WHERE user_id = ? ORDER BY updated_at DESC, created_at DESC",
+            (current_user["id"],),
+        )
+        rows = await cur.fetchall()
+    return [_parse_favorite_job_row(dict(row)) for row in rows]
+
+
+@app.post("/api/favorites/jobs")
+async def create_favorite_job(body: FavoriteJobBody, current_user=Depends(get_current_user)):
+    payload = body.model_dump() if hasattr(body, "model_dump") else body.dict()
+    job_url = sanitize_line(payload.get("job_url"), 320)
+    if not job_url:
+        raise HTTPException(400, "job_url required")
+    now = datetime.utcnow().isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute(
+            """INSERT INTO favorite_jobs
+               (user_id, search_result_id, job_url, job_title, company_name, source, location, contract_type, notes, payload_json, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(user_id, job_url) DO UPDATE SET
+                   search_result_id = excluded.search_result_id,
+                   job_title = excluded.job_title,
+                   company_name = excluded.company_name,
+                   source = excluded.source,
+                   location = excluded.location,
+                   contract_type = excluded.contract_type,
+                   notes = CASE
+                       WHEN excluded.notes != '' THEN excluded.notes
+                       ELSE favorite_jobs.notes
+                   END,
+                   payload_json = excluded.payload_json,
+                   updated_at = excluded.updated_at""",
+            (
+                current_user["id"],
+                payload.get("search_result_id"),
+                job_url,
+                sanitize_line(payload.get("job_title"), 180),
+                sanitize_line(payload.get("company_name"), 140),
+                sanitize_line(payload.get("source"), 80),
+                sanitize_line(payload.get("location"), 140),
+                sanitize_line(payload.get("contract_type"), 80),
+                sanitize_block(payload.get("notes"), 500),
+                dumps_json(payload.get("payload") or {}),
+                now,
+            ),
+        )
+        await db.commit()
+        cur = await db.execute(
+            "SELECT * FROM favorite_jobs WHERE user_id = ? AND job_url = ?",
+            (current_user["id"], job_url),
+        )
+        row = await cur.fetchone()
+    return _parse_favorite_job_row(dict(row))
+
+
+@app.put("/api/favorites/jobs/{favorite_id}")
+async def update_favorite_job(favorite_id: int, body: FavoriteJobUpdate, current_user=Depends(get_current_user)):
+    payload = body.model_dump(exclude_none=True) if hasattr(body, "model_dump") else body.dict(exclude_none=True)
+    if "notes" not in payload:
+        raise HTTPException(400, "No update payload")
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute(
+            "UPDATE favorite_jobs SET notes = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+            (
+                sanitize_block(payload.get("notes"), 500),
+                datetime.utcnow().isoformat(),
+                favorite_id,
+                current_user["id"],
+            ),
+        )
+        await db.commit()
+        cur = await db.execute("SELECT * FROM favorite_jobs WHERE id = ? AND user_id = ?", (favorite_id, current_user["id"]))
+        row = await cur.fetchone()
+        if not row:
+            raise HTTPException(404, "Favorite job not found")
+    return _parse_favorite_job_row(dict(row))
+
+
+@app.delete("/api/favorites/jobs/{favorite_id}")
+async def delete_favorite_job(favorite_id: int, current_user=Depends(get_current_user)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM favorite_jobs WHERE id = ? AND user_id = ?", (favorite_id, current_user["id"]))
+        await db.commit()
+    return {"deleted": favorite_id}
+
+
+@app.get("/api/ops/overview")
+async def get_ops_overview(current_user=Depends(get_current_user)):
+    profile_row, user = await _fetch_cv_profile(current_user["id"])
+    profile = _parse_cv_profile_row(profile_row, user)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        queue_cur = await db.execute(
+            "SELECT * FROM pipeline_queue_items WHERE user_id = ? ORDER BY created_at DESC LIMIT 20",
+            (current_user["id"],),
+        )
+        story_cur = await db.execute(
+            "SELECT * FROM story_bank_entries WHERE user_id = ? ORDER BY updated_at DESC LIMIT 20",
+            (current_user["id"],),
+        )
+        portal_cur = await db.execute(
+            "SELECT * FROM company_portals WHERE user_id = ? ORDER BY favorite DESC, updated_at DESC LIMIT 20",
+            (current_user["id"],),
+        )
+        portal_run_cur = await db.execute(
+            """SELECT runs.*, portals.company_name
+               FROM company_portal_runs runs
+               JOIN company_portals portals ON portals.id = runs.portal_id
+               WHERE portals.user_id = ?
+               ORDER BY runs.started_at DESC
+               LIMIT 20""",
+            (current_user["id"],),
+        )
+        research_cur = await db.execute(
+            "SELECT * FROM company_research_reports WHERE user_id = ? ORDER BY created_at DESC LIMIT 10",
+            (current_user["id"],),
+        )
+        training_cur = await db.execute(
+            "SELECT * FROM career_evaluations WHERE user_id = ? AND kind = 'training' ORDER BY created_at DESC LIMIT 10",
+            (current_user["id"],),
+        )
+        project_cur = await db.execute(
+            "SELECT * FROM career_evaluations WHERE user_id = ? AND kind = 'project' ORDER BY created_at DESC LIMIT 10",
+            (current_user["id"],),
+        )
+        favorite_job_cur = await db.execute(
+            "SELECT * FROM favorite_jobs WHERE user_id = ? ORDER BY updated_at DESC LIMIT 20",
+            (current_user["id"],),
+        )
+        queue_rows = await queue_cur.fetchall()
+        story_rows = await story_cur.fetchall()
+        portal_rows = await portal_cur.fetchall()
+        portal_run_rows = await portal_run_cur.fetchall()
+        research_rows = await research_cur.fetchall()
+        training_rows = await training_cur.fetchall()
+        project_rows = await project_cur.fetchall()
+        favorite_job_rows = await favorite_job_cur.fetchall()
+    return {
+        "tracker_statuses": tracker_status_meta(),
+        "story_bank": {
+            "items": [_parse_story_bank_row(dict(row)) for row in story_rows],
+            "suggestions": story_bank_suggestions(profile),
+        },
+        "pipeline_queue": [_parse_queue_item_row(dict(row)) for row in queue_rows],
+        "company_portals": [_parse_company_portal_row(dict(row)) for row in portal_rows],
+        "company_portal_runs": [_parse_company_portal_run_row(dict(row)) for row in portal_run_rows],
+        "company_research": [_parse_company_research_row(dict(row)) for row in research_rows],
+        "training_evaluations": [_parse_career_evaluation_row(dict(row)) for row in training_rows],
+        "project_evaluations": [_parse_career_evaluation_row(dict(row)) for row in project_rows],
+        "favorite_jobs": [_parse_favorite_job_row(dict(row)) for row in favorite_job_rows],
+    }
 
 
 @app.get("/api/watchlists")
@@ -1086,6 +2085,32 @@ async def watchlist_scheduler_loop():
                 asyncio.create_task(_run_watchlist_by_id(watchlist_id))
         except Exception as e:
             logger.exception("watchlist scheduler crashed: %s", e)
+
+        await asyncio.sleep(WATCHLIST_POLL_SECONDS)
+
+
+async def company_portal_scheduler_loop():
+    while True:
+        try:
+            now = datetime.utcnow().isoformat()
+            async with aiosqlite.connect(DB_PATH) as db:
+                db.row_factory = aiosqlite.Row
+                cur = await db.execute(
+                    """SELECT * FROM company_portals
+                       WHERE active = 1 AND careers_url != '' AND (next_scan_at IS NULL OR next_scan_at <= ?)
+                       ORDER BY favorite DESC, next_scan_at ASC, created_at ASC""",
+                    (now,),
+                )
+                rows = await cur.fetchall()
+
+            for row in rows:
+                portal_id = row["id"]
+                if portal_id in ACTIVE_COMPANY_PORTAL_SCANS:
+                    continue
+                ACTIVE_COMPANY_PORTAL_SCANS.add(portal_id)
+                asyncio.create_task(_run_company_portal_scan_by_id(portal_id))
+        except Exception as e:
+            logger.exception("company portal scheduler crashed: %s", e)
 
         await asyncio.sleep(WATCHLIST_POLL_SECONDS)
 

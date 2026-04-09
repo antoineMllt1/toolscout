@@ -14,6 +14,35 @@ const EMPTY_PROFILE = {
   website: '',
   linkedin: '',
   github: '',
+  target_roles: [],
+  cv_text: '',
+  portfolio_url: '',
+  portfolio_snapshot: {},
+  portfolio_last_scraped_at: '',
+  candidate_brief: {
+    summary: '',
+    focus_areas: [],
+    strengths: [],
+    project_highlights: [],
+    source_health: {},
+  },
+  student_guidance: {
+    role_tracks: [],
+    story_starters: [],
+    project_ideas: [],
+  },
+  interview_prep: {
+    practice_plan: [],
+    motivation_questions: [],
+    behavioural_questions: [],
+    role_question_sets: [],
+  },
+  application_plan: {
+    readiness_score: 0,
+    checklist: [],
+    priority_actions: [],
+    next_week_plan: [],
+  },
   summary: '',
   skills: [],
   languages: [],
@@ -39,6 +68,20 @@ function makeId() {
     return crypto.randomUUID()
   }
   return `cv-${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+function formatDate(value) {
+  if (!value) return 'Jamais'
+  try {
+    return new Date(value).toLocaleString('fr-FR', {
+      day: '2-digit',
+      month: 'short',
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+  } catch {
+    return value
+  }
 }
 
 function createEducation() {
@@ -97,6 +140,124 @@ function SectionHeader({ eyebrow, title, note }) {
   )
 }
 
+function InsightMetric({ label, value, tone = '' }) {
+  return (
+    <article className={`summary-card ${tone}`}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </article>
+  )
+}
+
+function StoryStarterCard({ item }) {
+  return (
+    <article className="coach-card">
+      <p className="eyebrow">Story starter</p>
+      <h3>{item.title}</h3>
+      <p>{item.when_to_use}</p>
+      <div className="coach-block">
+        <span>Prompt</span>
+        <p>{item.prompt}</p>
+      </div>
+      {item.focus_points?.length ? (
+        <div className="coach-chip-row">
+          {item.focus_points.map((point) => (
+            <span key={point} className="inline-badge">
+              {point}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </article>
+  )
+}
+
+function ProjectIdeaCard({ item }) {
+  return (
+    <article className="coach-card">
+      <p className="eyebrow">{item.track}</p>
+      <h3>{item.title}</h3>
+      <p>{item.brief}</p>
+      <div className="coach-block">
+        <span>Pourquoi ce projet aide</span>
+        <p>{item.why_it_helps}</p>
+      </div>
+      <div className="coach-chip-row">
+        {(item.stack || []).map((tech) => (
+          <span key={tech} className="inline-badge">
+            {tech}
+          </span>
+        ))}
+      </div>
+    </article>
+  )
+}
+
+function InterviewQuestionCard({ item }) {
+  return (
+    <article className="coach-card">
+      <p className="eyebrow">{item.category}</p>
+      <h3>{item.question}</h3>
+      <div className="coach-block">
+        <span>Pourquoi on te la pose</span>
+        <p>{item.why_asked}</p>
+      </div>
+      <div className="coach-block">
+        <span>Structure de reponse</span>
+        <p>{item.answer_shape}</p>
+      </div>
+      {(item.evidence_refs || []).length ? (
+        <div className="coach-chip-row">
+          {item.evidence_refs.map((ref) => (
+            <span key={ref} className="inline-badge">
+              {ref}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </article>
+  )
+}
+
+function ChecklistRow({ item }) {
+  return (
+    <div className={`checklist-row ${item.done ? 'is-done' : ''}`}>
+      <div className="checklist-mark">{item.done ? 'OK' : 'TODO'}</div>
+      <div className="checklist-copy">
+        <strong>{item.label}</strong>
+        <p>{item.detail}</p>
+      </div>
+    </div>
+  )
+}
+
+function PortfolioProjectCard({ project }) {
+  return (
+    <article className="portfolio-project-card">
+      <div className="portfolio-project-head">
+        <div>
+          <h3>{project.name}</h3>
+          <p>{project.summary || 'Projet importe depuis le portfolio.'}</p>
+        </div>
+        {project.url ? (
+          <a className="text-action" href={project.url} target="_blank" rel="noreferrer">
+            Ouvrir
+          </a>
+        ) : null}
+      </div>
+      {(project.technologies || []).length ? (
+        <div className="coach-chip-row">
+          {project.technologies.map((tech) => (
+            <span key={tech} className="inline-badge">
+              {tech}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </article>
+  )
+}
+
 function ExperienceEditor({ items, onChange }) {
   const updateItem = (id, patch) => {
     onChange(items.map((item) => (item.id === id ? { ...item, ...patch } : item)))
@@ -107,14 +268,14 @@ function ExperienceEditor({ items, onChange }) {
       <div className="cv-section-head">
         <div>
           <p className="eyebrow">Experience</p>
-          <h3>Experiences professionnelles</h3>
+          <h3>Experiences</h3>
         </div>
         <button className="secondary-button" type="button" onClick={() => onChange([...items, createExperience()])}>
           Ajouter
         </button>
       </div>
 
-      {items.length === 0 ? <div className="cv-empty-slot">Aucune experience pour le moment.</div> : null}
+      {items.length === 0 ? <div className="cv-empty-slot">Ajoute au moins une experience concrete.</div> : null}
 
       {items.map((item) => (
         <article key={item.id} className="cv-entry-card">
@@ -127,7 +288,7 @@ function ExperienceEditor({ items, onChange }) {
                   checked={Boolean(item.featured)}
                   onChange={(event) => updateItem(item.id, { featured: event.target.checked })}
                 />
-                <span>Mettre en avant</span>
+                <span>Prioritaire</span>
               </label>
               <button className="text-action danger" type="button" onClick={() => onChange(items.filter((entry) => entry.id !== item.id))}>
                 Supprimer
@@ -141,7 +302,7 @@ function ExperienceEditor({ items, onChange }) {
               <input value={item.title} onChange={(event) => updateItem(item.id, { title: event.target.value })} />
             </label>
             <label className="field-stack">
-              <span>Entreprise</span>
+              <span>Structure</span>
               <input value={item.company} onChange={(event) => updateItem(item.id, { company: event.target.value })} />
             </label>
             <label className="field-stack">
@@ -151,16 +312,8 @@ function ExperienceEditor({ items, onChange }) {
             <label className="field-stack">
               <span>Dates</span>
               <div className="cv-date-row">
-                <input
-                  value={item.start_date}
-                  onChange={(event) => updateItem(item.id, { start_date: event.target.value })}
-                  placeholder="2024"
-                />
-                <input
-                  value={item.end_date}
-                  onChange={(event) => updateItem(item.id, { end_date: event.target.value })}
-                  placeholder="Present"
-                />
+                <input value={item.start_date} onChange={(event) => updateItem(item.id, { start_date: event.target.value })} placeholder="2024" />
+                <input value={item.end_date} onChange={(event) => updateItem(item.id, { end_date: event.target.value })} placeholder="Present" />
               </div>
             </label>
           </div>
@@ -171,18 +324,18 @@ function ExperienceEditor({ items, onChange }) {
               rows={3}
               value={item.summary}
               onChange={(event) => updateItem(item.id, { summary: event.target.value })}
-              placeholder="Contexte, responsabilites, outils, resultats deja verifies."
+              placeholder="Contexte, scope, ce que tu as gere toi-meme."
             />
           </label>
 
           <div className="cv-entry-grid">
             <label className="field-stack">
-              <span>Highlights verifies</span>
+              <span>Faits ou impacts</span>
               <textarea
                 rows={4}
                 value={arrayToLines(item.highlights)}
                 onChange={(event) => updateItem(item.id, { highlights: linesToArray(event.target.value) })}
-                placeholder={'Une ligne = un fait reel\nEx: Automatisation de reporting Power BI'}
+                placeholder={'Une ligne = un point utile en entretien\nEx: Automatise un reporting hebdomadaire'}
               />
             </label>
             <label className="field-stack">
@@ -191,7 +344,7 @@ function ExperienceEditor({ items, onChange }) {
                 rows={4}
                 value={arrayToLines(item.skills)}
                 onChange={(event) => updateItem(item.id, { skills: linesToArray(event.target.value) })}
-                placeholder={'SQL\nPower BI\nStakeholder management'}
+                placeholder={'SQL\nPower BI\nCoordination'}
               />
             </label>
           </div>
@@ -218,7 +371,7 @@ function ProjectEditor({ items, onChange }) {
         </button>
       </div>
 
-      {items.length === 0 ? <div className="cv-empty-slot">Aucun projet pour le moment.</div> : null}
+      {items.length === 0 ? <div className="cv-empty-slot">Le portfolio importe des projets, mais tu peux aussi en saisir a la main.</div> : null}
 
       {items.map((item) => (
         <article key={item.id} className="cv-entry-card">
@@ -231,7 +384,7 @@ function ProjectEditor({ items, onChange }) {
                   checked={Boolean(item.featured)}
                   onChange={(event) => updateItem(item.id, { featured: event.target.checked })}
                 />
-                <span>Mettre en avant</span>
+                <span>Prioritaire</span>
               </label>
               <button className="text-action danger" type="button" onClick={() => onChange(items.filter((entry) => entry.id !== item.id))}>
                 Supprimer
@@ -255,18 +408,18 @@ function ProjectEditor({ items, onChange }) {
           </div>
 
           <label className="field-stack">
-            <span>Resume factuel</span>
+            <span>Resume</span>
             <textarea
               rows={3}
               value={item.summary}
               onChange={(event) => updateItem(item.id, { summary: event.target.value })}
-              placeholder="Objectif, stack, perimetre, resultats deja verifies."
+              placeholder="Probleme, approche, resultat ou apprentissage."
             />
           </label>
 
           <div className="cv-entry-grid">
             <label className="field-stack">
-              <span>Highlights verifies</span>
+              <span>Faits ou livrables</span>
               <textarea
                 rows={4}
                 value={arrayToLines(item.highlights)}
@@ -305,7 +458,7 @@ function EducationEditor({ items, onChange }) {
         </button>
       </div>
 
-      {items.length === 0 ? <div className="cv-empty-slot">Aucune formation pour le moment.</div> : null}
+      {items.length === 0 ? <div className="cv-empty-slot">Ajoute ta formation pour donner du contexte au recruteur.</div> : null}
 
       {items.map((item) => (
         <article key={item.id} className="cv-entry-card">
@@ -318,7 +471,7 @@ function EducationEditor({ items, onChange }) {
                   checked={Boolean(item.featured)}
                   onChange={(event) => updateItem(item.id, { featured: event.target.checked })}
                 />
-                <span>Mettre en avant</span>
+                <span>Prioritaire</span>
               </label>
               <button className="text-action danger" type="button" onClick={() => onChange(items.filter((entry) => entry.id !== item.id))}>
                 Supprimer
@@ -346,41 +499,25 @@ function EducationEditor({ items, onChange }) {
             <label className="field-stack">
               <span>Dates</span>
               <div className="cv-date-row">
-                <input
-                  value={item.start_date}
-                  onChange={(event) => updateItem(item.id, { start_date: event.target.value })}
-                  placeholder="2022"
-                />
-                <input
-                  value={item.end_date}
-                  onChange={(event) => updateItem(item.id, { end_date: event.target.value })}
-                  placeholder="2025"
-                />
+                <input value={item.start_date} onChange={(event) => updateItem(item.id, { start_date: event.target.value })} placeholder="2022" />
+                <input value={item.end_date} onChange={(event) => updateItem(item.id, { end_date: event.target.value })} placeholder="2026" />
               </div>
             </label>
           </div>
 
           <label className="field-stack">
-            <span>Resume factuel</span>
+            <span>Resume</span>
             <textarea rows={3} value={item.summary} onChange={(event) => updateItem(item.id, { summary: event.target.value })} />
           </label>
 
           <div className="cv-entry-grid">
             <label className="field-stack">
-              <span>Highlights verifies</span>
-              <textarea
-                rows={4}
-                value={arrayToLines(item.highlights)}
-                onChange={(event) => updateItem(item.id, { highlights: linesToArray(event.target.value) })}
-              />
+              <span>Faits utiles</span>
+              <textarea rows={4} value={arrayToLines(item.highlights)} onChange={(event) => updateItem(item.id, { highlights: linesToArray(event.target.value) })} />
             </label>
             <label className="field-stack">
-              <span>Competences utiles</span>
-              <textarea
-                rows={4}
-                value={arrayToLines(item.skills)}
-                onChange={(event) => updateItem(item.id, { skills: linesToArray(event.target.value) })}
-              />
+              <span>Competences</span>
+              <textarea rows={4} value={arrayToLines(item.skills)} onChange={(event) => updateItem(item.id, { skills: linesToArray(event.target.value) })} />
             </label>
           </div>
         </article>
@@ -421,9 +558,11 @@ export default function CvStudioPage({ onNavigate }) {
   const [sourceMode, setSourceMode] = useState('selected-result')
   const [applicationId, setApplicationId] = useState('')
   const [savingProfile, setSavingProfile] = useState(false)
+  const [importingPortfolio, setImportingPortfolio] = useState(false)
   const [generatingDraft, setGeneratingDraft] = useState(false)
   const [enhancingDraft, setEnhancingDraft] = useState(false)
   const [feedback, setFeedback] = useState('')
+  const [feedbackTone, setFeedbackTone] = useState('info')
 
   useEffect(() => {
     if (!selectedResult) {
@@ -444,7 +583,7 @@ export default function CvStudioPage({ onNavigate }) {
   async function loadProfile() {
     const response = await authFetch('/api/cv/profile')
     if (!response.ok) return
-    setProfile(await response.json())
+    setProfile({ ...EMPTY_PROFILE, ...(await response.json()) })
   }
 
   async function loadTemplates() {
@@ -470,17 +609,48 @@ export default function CvStudioPage({ onNavigate }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(profile),
       })
-      if (!response.ok) {
-        const error = await response.json()
-        throw new Error(error.detail || 'Unable to save profile')
-      }
       const data = await response.json()
-      setProfile(data)
-      setFeedback('Profil CV sauvegarde.')
+      if (!response.ok) {
+        throw new Error(data.detail || 'Impossible de sauvegarder le profil')
+      }
+      setProfile({ ...EMPTY_PROFILE, ...data })
+      setFeedbackTone('info')
+      setFeedback('Profil candidat sauvegarde.')
     } catch (error) {
+      setFeedbackTone('danger')
       setFeedback(error.message)
     } finally {
       setSavingProfile(false)
+    }
+  }
+
+  async function importPortfolio() {
+    if (!profile.portfolio_url.trim()) {
+      setFeedbackTone('danger')
+      setFeedback('Ajoute une URL de portfolio avant de lancer le scraping.')
+      return
+    }
+
+    setImportingPortfolio(true)
+    setFeedback('')
+    try {
+      const response = await authFetch('/api/cv/portfolio/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ portfolio_url: profile.portfolio_url }),
+      })
+      const payload = await response.json()
+      if (!response.ok) {
+        throw new Error(payload.detail || 'Impossible de scraper le portfolio')
+      }
+      setProfile({ ...EMPTY_PROFILE, ...(payload.profile || {}) })
+      setFeedbackTone('info')
+      setFeedback(`Portfolio importe. ${payload.imported?.projects_found || 0} projet(s) detecte(s).`)
+    } catch (error) {
+      setFeedbackTone('danger')
+      setFeedback(error.message)
+    } finally {
+      setImportingPortfolio(false)
     }
   }
 
@@ -494,7 +664,7 @@ export default function CvStudioPage({ onNavigate }) {
       } else if (applicationId) {
         payload.application_id = Number(applicationId)
       } else {
-        throw new Error('Choisis une annonce ou une candidature.')
+        throw new Error('Choisis une annonce ou une candidature pour generer le draft.')
       }
 
       const response = await authFetch('/api/cv/drafts/generate', {
@@ -502,15 +672,16 @@ export default function CvStudioPage({ onNavigate }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       })
-      if (!response.ok) {
-        const error = await response.json()
-        throw new Error(error.detail || 'Unable to generate draft')
-      }
       const draft = await response.json()
+      if (!response.ok) {
+        throw new Error(draft.detail || 'Impossible de generer le draft')
+      }
       setDrafts((prev) => [draft, ...prev.filter((item) => item.id !== draft.id)])
       setSelectedDraftId(draft.id)
-      setFeedback('Draft moderncv genere.')
+      setFeedbackTone('info')
+      setFeedback('Draft cible genere.')
     } catch (error) {
+      setFeedbackTone('danger')
       setFeedback(error.message)
     } finally {
       setGeneratingDraft(false)
@@ -525,7 +696,7 @@ export default function CvStudioPage({ onNavigate }) {
     const url = URL.createObjectURL(blob)
     const anchor = document.createElement('a')
     anchor.href = url
-    anchor.download = `toolscout-cv-${draft.id}.tex`
+    anchor.download = `stageai-cv-${draft.id}.tex`
     anchor.click()
     URL.revokeObjectURL(url)
   }
@@ -537,11 +708,13 @@ export default function CvStudioPage({ onNavigate }) {
       const response = await authFetch(`/api/cv/drafts/${draft.id}/copywrite`, { method: 'POST' })
       const payload = await response.json()
       if (!response.ok) {
-        throw new Error(payload.detail || 'Unable to improve draft')
+        throw new Error(payload.detail || 'Impossible de polir le draft')
       }
       setCopySuggestionsByDraft((prev) => ({ ...prev, [draft.id]: payload.suggestions }))
-      setFeedback('Suggestions Haiku recues.')
+      setFeedbackTone('info')
+      setFeedback('Suggestions de copywriting recues.')
     } catch (error) {
+      setFeedbackTone('danger')
       setFeedback(error.message)
     } finally {
       setEnhancingDraft(false)
@@ -553,7 +726,7 @@ export default function CvStudioPage({ onNavigate }) {
       <main className="cv-page">
         <section className="empty-panel">
           <p className="eyebrow">Compte requis</p>
-          <h3>Connecte-toi pour saisir ton profil et generer des CV cibles par annonce.</h3>
+          <h3>Connecte-toi pour construire ton profil, importer ton portfolio et preparer tes candidatures.</h3>
           <button className="primary-button" onClick={() => onNavigate('auth')}>
             Ouvrir la connexion
           </button>
@@ -565,60 +738,145 @@ export default function CvStudioPage({ onNavigate }) {
   const selectedPayload = selectedDraft?.selected_payload || {}
   const selectedCounts = selectedPayload.match_summary?.selected_counts || {}
   const copySuggestions = selectedDraft ? copySuggestionsByDraft[selectedDraft.id] : null
+  const candidateBrief = profile.candidate_brief || EMPTY_PROFILE.candidate_brief
+  const studentGuidance = profile.student_guidance || EMPTY_PROFILE.student_guidance
+  const interviewPrep = profile.interview_prep || EMPTY_PROFILE.interview_prep
+  const applicationPlan = profile.application_plan || EMPTY_PROFILE.application_plan
+  const portfolioSnapshot = profile.portfolio_snapshot || {}
+  const sourceHealth = candidateBrief.source_health || {}
 
   return (
     <main className="cv-page">
       <section className="cv-hero-grid">
         <article className="hero-slab dark fade-stagger" style={{ '--index': 0 }}>
           <div className="hero-copy">
-            <p className="eyebrow is-light">CV Studio</p>
-            <h1 className="dashboard-display">Genere un CV cible sans laisser l'IA inventer.</h1>
+            <p className="eyebrow is-light">Candidate profile</p>
+            <h1 className="dashboard-display">Ton CV general, ton portfolio et tes preuves de stage au meme endroit.</h1>
             <p className="lede is-light">
-              Le profil utilisateur reste la source de verite. Le moteur choisit les experiences, projets
-              et competences qui matchent l'annonce, puis sort un draft strict compatible moderncv.
+              Le but n&apos;est pas seulement de remplir un CV. Cette page sert a comprendre ton profil,
+              recuperer les bons projets depuis ton portfolio, puis transformer tout ca en candidatures plus solides.
             </p>
           </div>
+
           <div className="hero-action-row">
             <button className="primary-button light" onClick={() => onNavigate('search')}>
               Retour aux annonces
             </button>
             <button className="secondary-button dark" onClick={() => onNavigate('dashboard')}>
-              Retour cockpit
+              Ouvrir le cockpit
             </button>
+          </div>
+
+          <div className="hero-stat-strip">
+            <div className="hero-stat-chip">
+              <span>CV master</span>
+              <strong>{sourceHealth.has_cv_text ? 'Oui' : 'A faire'}</strong>
+            </div>
+            <div className="hero-stat-chip">
+              <span>Portfolio</span>
+              <strong>{sourceHealth.has_portfolio ? 'Connecte' : 'A relier'}</strong>
+            </div>
+            <div className="hero-stat-chip">
+              <span>Projets</span>
+              <strong>{profile.projects.length}</strong>
+            </div>
           </div>
         </article>
 
         <aside className="hero-rail">
           <article className="rail-panel fade-stagger" style={{ '--index': 1 }}>
-            <p className="eyebrow">Regles strictes</p>
-            <h2>Le draft part uniquement de tes faits verifies.</h2>
-            <p>La future API IA servira au copywriting, pas a inventer des experiences ou des chiffres.</p>
+            <p className="eyebrow">Lecture rapide</p>
+            <h2>{portfolioSnapshot.page_title || 'Aucun portfolio scrape pour le moment'}</h2>
+            <p>
+              {portfolioSnapshot.domain
+                ? `${portfolioSnapshot.domain} - dernier import ${formatDate(profile.portfolio_last_scraped_at)}`
+                : 'Ajoute ton portfolio pour recuperer des projets et des signaux utiles.'}
+            </p>
+            {portfolioSnapshot.final_url ? (
+              <a className="text-action" href={portfolioSnapshot.final_url} target="_blank" rel="noreferrer">
+                Ouvrir le portfolio
+              </a>
+            ) : null}
           </article>
 
           <div className="dashboard-summary-grid">
-            <article className="summary-card tone-blue fade-stagger" style={{ '--index': 2 }}>
-              <span>Templates</span>
-              <strong>{templates.length}</strong>
-            </article>
-            <article className="summary-card tone-green fade-stagger" style={{ '--index': 3 }}>
-              <span>Drafts</span>
-              <strong>{drafts.length}</strong>
-            </article>
-            <article className="summary-card tone-yellow fade-stagger" style={{ '--index': 4 }}>
-              <span>Candidatures</span>
-              <strong>{applications.length}</strong>
-            </article>
+            <InsightMetric label="Roles cibles" value={profile.target_roles.length} tone="tone-blue" />
+            <InsightMetric label="Readiness" value={`${applicationPlan.readiness_score || 0}%`} tone="tone-green" />
+            <InsightMetric label="Drafts" value={drafts.length} tone="tone-yellow" />
           </div>
         </aside>
       </section>
 
       <section className="cv-layout">
         <div className="cv-main-column">
-          <section className="panel-shell fade-stagger" style={{ '--index': 5 }}>
+          <section className="panel-shell fade-stagger" style={{ '--index': 2 }}>
             <SectionHeader
-              eyebrow="Profil"
-              title="Informations de base"
-              note="Renseigne les donnees stables du CV. Ce bloc nourrit tous les drafts."
+              eyebrow="Source of truth"
+              title="CV general et portfolio"
+              note="Pense comme un etudiant: un CV master brut + un portfolio vivant = la meilleure base pour toutes les candidatures."
+            />
+
+            <div className="source-truth-grid">
+              <label className="field-stack cv-raw-source">
+                <span>CV general brut</span>
+                <textarea
+                  className="cv-raw-editor"
+                  rows={16}
+                  value={profile.cv_text}
+                  onChange={(event) => setProfile((prev) => ({ ...prev, cv_text: event.target.value }))}
+                  placeholder="Colle ici ton CV complet en texte brut ou markdown. Le systeme s'en sert comme source de contexte, meme si tu structures aussi les sections plus bas."
+                />
+              </label>
+
+              <div className="source-truth-side">
+                <label className="field-stack">
+                  <span>URL de portfolio</span>
+                  <input
+                    value={profile.portfolio_url}
+                    onChange={(event) => setProfile((prev) => ({ ...prev, portfolio_url: event.target.value }))}
+                    placeholder="https://ton-portfolio.dev"
+                  />
+                </label>
+
+                <div className="cv-panel-actions">
+                  <button className="primary-button" type="button" onClick={saveProfile} disabled={savingProfile}>
+                    {savingProfile ? 'Sauvegarde...' : 'Sauvegarder'}
+                  </button>
+                  <button className="secondary-button" type="button" onClick={importPortfolio} disabled={importingPortfolio}>
+                    {importingPortfolio ? 'Scraping...' : 'Scraper le portfolio'}
+                  </button>
+                </div>
+
+                {feedback ? <div className={`feedback-box ${feedbackTone === 'danger' ? 'danger' : 'info'}`}>{feedback}</div> : null}
+
+                <div className="portfolio-summary-card">
+                  <div className="portfolio-summary-head">
+                    <div>
+                      <p className="eyebrow">Portfolio sync</p>
+                      <h3>{portfolioSnapshot.domain || 'Pas encore synchronise'}</h3>
+                    </div>
+                    {portfolioSnapshot.links?.github ? (
+                      <a className="text-action" href={portfolioSnapshot.links.github} target="_blank" rel="noreferrer">
+                        GitHub
+                      </a>
+                    ) : null}
+                  </div>
+                  <p>{portfolioSnapshot.narrative || 'Le scrape va detecter les pages, projets, technos et liens visibles sur ton portfolio.'}</p>
+                  <div className="coach-chip-row">
+                    <span className="inline-badge">{portfolioSnapshot.projects?.length || 0} projet(s)</span>
+                    <span className="inline-badge">{portfolioSnapshot.skills?.length || 0} skill(s)</span>
+                    <span className="inline-badge">Mis a jour {formatDate(profile.portfolio_last_scraped_at)}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section className="panel-shell fade-stagger" style={{ '--index': 3 }}>
+            <SectionHeader
+              eyebrow="Positioning"
+              title="Identite et roles cibles"
+              note="Ces champs servent a orienter le profil, les entrainements et les idees de projets a construire."
             />
 
             <div className="cv-entry-grid cv-basics-grid">
@@ -628,7 +886,7 @@ export default function CvStudioPage({ onNavigate }) {
               </label>
               <label className="field-stack">
                 <span>Headline</span>
-                <input value={profile.headline} onChange={(event) => setProfile((prev) => ({ ...prev, headline: event.target.value }))} placeholder="Data analyst | Automation | BI" />
+                <input value={profile.headline} onChange={(event) => setProfile((prev) => ({ ...prev, headline: event.target.value }))} placeholder="Data intern | Automation | Analytics" />
               </label>
               <label className="field-stack">
                 <span>Email</span>
@@ -662,37 +920,208 @@ export default function CvStudioPage({ onNavigate }) {
                 rows={4}
                 value={profile.summary}
                 onChange={(event) => setProfile((prev) => ({ ...prev, summary: event.target.value }))}
-                placeholder="Resume sobre, sans invention, qui peut etre reoriente ensuite vers plusieurs postes."
+                placeholder="Resume sobre: ce que tu sais faire, le type d'environnement que tu vises et les sujets sur lesquels tu veux etre credible."
               />
             </label>
 
             <div className="cv-tag-grid">
+              <TagInput label="Roles cibles" placeholder="Data analyst intern, Product ops intern..." value={profile.target_roles} onChange={(target_roles) => setProfile((prev) => ({ ...prev, target_roles }))} />
               <TagInput label="Competences principales" placeholder="SQL, Power BI, Python..." value={profile.skills} onChange={(skills) => setProfile((prev) => ({ ...prev, skills }))} />
               <TagInput label="Langues" placeholder="French native, English C1" value={profile.languages} onChange={(languages) => setProfile((prev) => ({ ...prev, languages }))} />
               <TagInput label="Certifications" placeholder="PL-300, Google Analytics..." value={profile.certifications} onChange={(certifications) => setProfile((prev) => ({ ...prev, certifications }))} />
             </div>
+          </section>
 
-            <div className="cv-panel-actions">
-              <button className="primary-button" type="button" onClick={saveProfile} disabled={savingProfile}>
-                {savingProfile ? 'Sauvegarde...' : 'Sauvegarder le profil'}
-              </button>
-              {feedback ? <span className="panel-note">{feedback}</span> : null}
+          <section className="panel-shell fade-stagger" style={{ '--index': 4 }}>
+            <SectionHeader
+              eyebrow="Candidate signal"
+              title="Synthese automatique de ton profil"
+              note="Cette couche sert a mieux lire ton profil avant de personnaliser les candidatures."
+            />
+
+            <div className="candidate-brief-grid">
+              <article className="candidate-brief-card">
+                <p className="eyebrow">Synthese</p>
+                <h3>Lecture recruiter</h3>
+                <p>{candidateBrief.summary || 'Sauvegarde ton profil et relie ton portfolio pour generer une synthese.'}</p>
+              </article>
+
+              <article className="candidate-brief-card">
+                <p className="eyebrow">Focus</p>
+                <h3>Axes dominants</h3>
+                {(candidateBrief.focus_areas || []).length ? (
+                  <div className="coach-chip-row">
+                    {candidateBrief.focus_areas.map((area) => (
+                      <span key={area} className="inline-badge">
+                        {area}
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <p>Ajoute tes competences et projets pour faire emerger les bons axes.</p>
+                )}
+              </article>
+
+              <article className="candidate-brief-card">
+                <p className="eyebrow">Strengths</p>
+                <h3>Ce que le systeme voit</h3>
+                {(candidateBrief.strengths || []).length ? (
+                  <ul className="signal-list">
+                    {candidateBrief.strengths.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p>Les points forts apparaitront ici apres sauvegarde du profil.</p>
+                )}
+              </article>
+            </div>
+
+            {(candidateBrief.project_highlights || []).length ? (
+              <div className="portfolio-project-grid">
+                {candidateBrief.project_highlights.map((project) => (
+                  <PortfolioProjectCard key={project.name} project={project} />
+                ))}
+              </div>
+            ) : null}
+          </section>
+
+          <section className="panel-shell fade-stagger" style={{ '--index': 5 }}>
+            <SectionHeader
+              eyebrow="Apply ready"
+              title="Checklist de readiness"
+              note="Une vue simple pour savoir si ton dossier est deja presentable ou s'il manque encore des pieces importantes."
+            />
+
+            <div className="readiness-hero">
+              <div className="readiness-score-ring">
+                <strong>{applicationPlan.readiness_score || 0}%</strong>
+                <span>pret a candidater</span>
+              </div>
+
+              <div className="readiness-copy">
+                <h3>Priorites immediates</h3>
+                <ul className="signal-list">
+                  {(applicationPlan.priority_actions || []).map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+
+            <div className="checklist-stack">
+              {(applicationPlan.checklist || []).map((item) => (
+                <ChecklistRow key={item.label} item={item} />
+              ))}
+            </div>
+
+            <div className="candidate-brief-grid compact">
+              <article className="candidate-brief-card">
+                <p className="eyebrow">Cette semaine</p>
+                <h3>Plan simple</h3>
+                <ul className="signal-list">
+                  {(applicationPlan.next_week_plan || []).map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              </article>
             </div>
           </section>
 
           <section className="panel-shell fade-stagger" style={{ '--index': 6 }}>
-            <SectionHeader eyebrow="Contenu" title="Blocs du CV" note="Tu peux garder beaucoup d'entrees. Le moteur cible les plus pertinentes selon le poste." />
+            <SectionHeader
+              eyebrow="Evidence bank"
+              title="Experiences, projets et formation"
+              note="C'est la matiere premiere des story starters, du CV cible et de tes futures candidatures."
+            />
+
             <div className="cv-editor-stack">
               <ExperienceEditor items={profile.experience} onChange={(experience) => setProfile((prev) => ({ ...prev, experience }))} />
               <ProjectEditor items={profile.projects} onChange={(projects) => setProfile((prev) => ({ ...prev, projects }))} />
               <EducationEditor items={profile.education} onChange={(education) => setProfile((prev) => ({ ...prev, education }))} />
+            </div>
+
+            <div className="cv-panel-actions">
+              <button className="primary-button" type="button" onClick={saveProfile} disabled={savingProfile}>
+                {savingProfile ? 'Sauvegarde...' : 'Sauvegarder ma base candidat'}
+              </button>
             </div>
           </section>
         </div>
 
         <aside className="cv-side-column">
           <section className="panel-shell fade-stagger" style={{ '--index': 7 }}>
-            <SectionHeader eyebrow="Generation" title="Cibler une annonce" note="Tu peux partir d'une annonce selectionnee ou d'une candidature sauvegardee." />
+            <SectionHeader
+              eyebrow="Training"
+              title="Story starters pour l'entretien"
+              note="Pas des reponses toutes faites. Des points de depart a retravailler en STAR."
+            />
+
+            <div className="coach-stack">
+              {(studentGuidance.story_starters || []).length ? (
+                studentGuidance.story_starters.map((item) => <StoryStarterCard key={`${item.title}-${item.prompt}`} item={item} />)
+              ) : (
+                <div className="cv-empty-slot">Ajoute des experiences ou projets pour generer des story starters.</div>
+              )}
+            </div>
+          </section>
+
+          <section className="panel-shell fade-stagger" style={{ '--index': 8 }}>
+            <SectionHeader
+              eyebrow="Interview drills"
+              title="Questions a bosser"
+              note="Des questions probables, reliees a tes roles cibles et a ce que ton profil montre deja."
+            />
+
+            <div className="coach-stack">
+              {(interviewPrep.practice_plan || []).length ? (
+                <article className="candidate-brief-card">
+                  <p className="eyebrow">Plan d'entrainement</p>
+                  <h3>Avant de candidater</h3>
+                  <ul className="signal-list">
+                    {interviewPrep.practice_plan.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                </article>
+              ) : null}
+
+              {(interviewPrep.motivation_questions || []).map((item) => (
+                <InterviewQuestionCard key={item.question} item={item} />
+              ))}
+              {(interviewPrep.behavioural_questions || []).map((item) => (
+                <InterviewQuestionCard key={item.question} item={item} />
+              ))}
+              {(interviewPrep.role_question_sets || []).flatMap((group) =>
+                (group.questions || []).map((item) => (
+                  <InterviewQuestionCard key={`${group.track}-${item.question}`} item={{ ...item, category: group.track }} />
+                )),
+              )}
+            </div>
+          </section>
+
+          <section className="panel-shell fade-stagger" style={{ '--index': 9 }}>
+            <SectionHeader
+              eyebrow="Build next"
+              title="Idees de projets a lancer"
+              note="Inspire de career-ops, mais pense pour un etudiant: des projets faisables qui renforcent un dossier de stage."
+            />
+
+            <div className="coach-stack">
+              {(studentGuidance.project_ideas || []).length ? (
+                studentGuidance.project_ideas.map((item) => <ProjectIdeaCard key={`${item.track}-${item.title}`} item={item} />)
+              ) : (
+                <div className="cv-empty-slot">Definis des roles cibles pour faire remonter des idees plus pertinentes.</div>
+              )}
+            </div>
+          </section>
+
+          <section className="panel-shell fade-stagger" style={{ '--index': 10 }}>
+            <SectionHeader
+              eyebrow="Generation"
+              title="Generer un CV cible"
+              note="Tu peux partir d'une annonce selectionnee ou d'une candidature sauvegardee."
+            />
 
             <label className="field-stack">
               <span>Template moderncv</span>
@@ -754,7 +1183,7 @@ export default function CvStudioPage({ onNavigate }) {
             </button>
           </section>
 
-          <section className="panel-shell fade-stagger" style={{ '--index': 8 }}>
+          <section className="panel-shell fade-stagger" style={{ '--index': 11 }}>
             <SectionHeader eyebrow="Drafts" title="Versions generees" />
             <div className="cv-draft-stack">
               {drafts.length === 0 ? (
@@ -767,7 +1196,7 @@ export default function CvStudioPage({ onNavigate }) {
             </div>
           </section>
 
-          <section className="panel-shell fade-stagger" style={{ '--index': 9 }}>
+          <section className="panel-shell fade-stagger" style={{ '--index': 12 }}>
             <SectionHeader
               eyebrow="Preview"
               title={selectedDraft ? selectedDraft.target_title || 'Draft selectionne' : 'Aucun draft'}
@@ -817,13 +1246,13 @@ export default function CvStudioPage({ onNavigate }) {
                     Telecharger le .tex
                   </button>
                   <button className="secondary-button" type="button" onClick={() => enhanceDraft(selectedDraft)} disabled={enhancingDraft}>
-                    {enhancingDraft ? 'Haiku travaille...' : 'Polir avec Haiku'}
+                    {enhancingDraft ? 'Analyse...' : 'Polir avec l IA'}
                   </button>
                 </div>
 
                 {copySuggestions ? (
                   <div className="cv-ai-panel">
-                    <p className="eyebrow">Suggestions Haiku</p>
+                    <p className="eyebrow">Suggestions de copywriting</p>
                     {copySuggestions.headline ? (
                       <div className="cv-ai-block">
                         <span>Headline</span>
@@ -841,7 +1270,9 @@ export default function CvStudioPage({ onNavigate }) {
                         <span>Skills a pousser</span>
                         <div className="cv-draft-meta">
                           {copySuggestions.skills_priority.map((skill) => (
-                            <span key={skill} className="inline-badge">{skill}</span>
+                            <span key={skill} className="inline-badge">
+                              {skill}
+                            </span>
                           ))}
                         </div>
                       </div>
@@ -878,7 +1309,7 @@ export default function CvStudioPage({ onNavigate }) {
                     ) : null}
                     {copySuggestions.compliance_notes?.length ? (
                       <div className="cv-ai-block">
-                        <span>Notes de conformite</span>
+                        <span>Notes</span>
                         <ul>
                           {copySuggestions.compliance_notes.map((note) => (
                             <li key={note}>{note}</li>

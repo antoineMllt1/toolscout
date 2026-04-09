@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useApplications } from '../context/ApplicationContext'
 import { useAuth } from '../context/AuthContext'
+import { useFavorites } from '../context/FavoritesContext'
 
 const STATUS_LABELS = {
   saved: 'A relire',
@@ -28,9 +29,12 @@ function formatSnippet(snippet) {
 export default function JobCard({ result, onOpen, isActive }) {
   const { user } = useAuth()
   const { byUrl, saveJob, updateStatus } = useApplications()
+  const { byJobUrl: favoriteByUrl, toggleJobFavorite } = useFavorites()
   const [saving, setSaving] = useState(false)
+  const [favoriting, setFavoriting] = useState(false)
 
   const application = byUrl[result.job_url]
+  const favorite = favoriteByUrl[result.job_url]
   const normalized = result.normalized || {}
   const contract = normalized.contract?.label || result.contract_type || 'Non precise'
   const remote = normalized.remote_mode?.label || 'A verifier'
@@ -59,6 +63,14 @@ export default function JobCard({ result, onOpen, isActive }) {
     setSaving(true)
     await updateStatus(application.id, next)
     setSaving(false)
+  }
+
+  async function handleFavorite(event) {
+    event.stopPropagation()
+    if (!user || favoriting) return
+    setFavoriting(true)
+    await toggleJobFavorite(result)
+    setFavoriting(false)
   }
 
   return (
@@ -111,16 +123,23 @@ export default function JobCard({ result, onOpen, isActive }) {
       </div>
 
       <div className="job-card-footer">
-        <button
-          className="text-action"
-          onClick={(event) => {
-            event.stopPropagation()
-            window.open(result.job_url, '_blank', 'noopener,noreferrer')
-          }}
-        >
-          Ouvrir l'annonce
-        </button>
-        <span className="mono-meta">overview</span>
+        <div className="job-card-footer-actions">
+          <button
+            className="text-action"
+            onClick={(event) => {
+              event.stopPropagation()
+              window.open(result.job_url, '_blank', 'noopener,noreferrer')
+            }}
+          >
+            Ouvrir l'annonce
+          </button>
+          {user ? (
+            <button className={`text-action ${favorite ? 'is-favorite' : ''}`} onClick={handleFavorite}>
+              {favoriting ? '...' : favorite ? 'Retirer favori' : 'Ajouter favori'}
+            </button>
+          ) : null}
+        </div>
+        <span className="mono-meta">{favorite ? 'favorite' : 'overview'}</span>
       </div>
     </article>
   )

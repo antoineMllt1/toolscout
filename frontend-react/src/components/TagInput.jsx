@@ -6,31 +6,31 @@ export default function TagInput({ label, placeholder, value, onChange }) {
   const commitDraft = () => {
     const next = draft.trim()
     if (!next) return
-    if (value.includes(next)) {
-      setDraft('')
-      return
-    }
+    if (value.includes(next)) { setDraft(''); return }
     onChange([...value, next])
     setDraft('')
   }
 
   return (
-    <label className="field-stack">
-      <span>{label}</span>
-      <div className="tag-input-shell">
+    <div className="tag-input-wrapper">
+      {label && <span className="tag-input-label">{label}</span>}
+      <div className="tag-input-field">
         {value.map((item) => (
-          <button
-            key={item}
-            type="button"
-            className="tag-chip"
-            onClick={() => onChange(value.filter((entry) => entry !== item))}
-          >
+          <span key={item} className="tag-pill">
             {item}
-          </button>
+            <button
+              type="button"
+              onClick={() => onChange(value.filter((entry) => entry !== item))}
+              aria-label={`Retirer ${item}`}
+            >
+              ×
+            </button>
+          </span>
         ))}
         <input
+          className="tag-input-inner"
           value={draft}
-          placeholder={placeholder}
+          placeholder={value.length ? '' : placeholder}
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === 'Enter' || event.key === ',') {
@@ -44,6 +44,6 @@ export default function TagInput({ label, placeholder, value, onChange }) {
           onBlur={commitDraft}
         />
       </div>
-    </label>
+    </div>
   )
 }

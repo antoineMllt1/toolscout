@@ -62,6 +62,11 @@ if os.path.exists(_assets_dir):
     app.mount("/assets", StaticFiles(directory=_assets_dir), name="assets")
 
 
+@app.get("/health")
+async def healthcheck():
+    return {"status": "ok"}
+
+
 # ── Auth models ─────────────────────────────────────────────────────────────
 class RegisterBody(BaseModel):
     email: str

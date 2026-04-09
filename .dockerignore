@@ -1,0 +1,9 @@
+backend/data.db
+backend/.secret_key
+backend/__pycache__
+backend/scrapers/__pycache__
+frontend-react/node_modules
+frontend-react/.vite
+.git
+.env
+*.pyc

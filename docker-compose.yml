@@ -1,0 +1,19 @@
+version: "3.9"
+
+services:
+  toolscout:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      # Persist SQLite DB (cookies + search history + users)
+      - toolscout_data:/app/data
+    environment:
+      - DB_PATH=/app/data/data.db
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+    restart: unless-stopped
+    # Chromium needs shared memory
+    shm_size: "1gb"
+
+volumes:
+  toolscout_data:

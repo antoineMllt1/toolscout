@@ -1,296 +1,371 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
-import JobCard from '../components/JobCard'
+import { useDeferredValue, useEffect, useMemo, useState } from 'react'
 import FilterBar from '../components/FilterBar'
+import JobCard from '../components/JobCard'
+import { useApplications } from '../context/ApplicationContext'
+import { useSearch } from '../context/SearchContext'
 
-const POPULAR_TOOLS = [
-  'n8n', 'Make', 'Zapier', 'Airtable', 'Notion', 'HubSpot',
-  'Power BI', 'Tableau', 'Salesforce', 'Figma', 'Snowflake', 'dbt',
-]
+const POPULAR_TOOLS = ['n8n', 'Make', 'Airtable', 'Notion', 'Power BI', 'Tableau', 'HubSpot', 'dbt']
+const SOURCE_META = {
+  wttj: { label: 'WTTJ', color: '#346538', background: '#edf3ec' },
+  linkedin: { label: 'LinkedIn', color: '#1f6c9f', background: '#e1f3fe' },
+  indeed: { label: 'Indeed', color: '#956400', background: '#fbf3db' },
+  jobteaser: { label: 'JobTeaser', color: '#9f2f2d', background: '#fdebec' },
+}
 
-const SOURCE_STATUS_LABELS = { wttj: 'WTTJ', linkedin: 'LinkedIn', indeed: 'Indeed', jobteaser: 'Jobteaser' }
-const SOURCE_COLORS = { wttj: '#7BBFAA', linkedin: '#0A66C2', indeed: '#6B9BC8', jobteaser: '#E8A598' }
-const ALL_SOURCES = ['wttj', 'linkedin', 'indeed', 'jobteaser']
-
-export default function SearchPage({ initialSearchId, onClearInitial }) {
-  const [tool, setTool] = useState('')
-  const [searchId, setSearchId] = useState(null)
-  const [status, setStatus] = useState('idle') // idle | running | completed | error
-  const [results, setResults] = useState([])
-  const [sourcesDone, setSourcesDone] = useState([])
-  const [total, setTotal] = useState(0)
-  const [filters, setFilters] = useState({ sources: [], contracts: [], locations: [], sort: 'recent' })
-  const sseRef = useRef(null)
-
-  // Load from history if passed
-  useEffect(() => {
-    if (initialSearchId) {
-      loadSearch(initialSearchId)
-      onClearInitial()
-    }
-  }, [initialSearchId])
-
-  async function loadSearch(id) {
-    try {
-      const res = await fetch(`/api/search/${id}/results`)
-      const data = await res.json()
-      setSearchId(data.search.id)
-      setTool(data.search.tool_name)
-      setStatus(data.search.status)
-      setTotal(data.search.total_results || 0)
-      setSourcesDone((data.search.sources_done || '').split(',').filter(Boolean))
-      setResults(
-        data.results.map(r => ({
-          ...r,
-          tool_context: tryParse(r.tool_context),
-        }))
-      )
-    } catch (e) {
-      console.error(e)
-    }
-  }
-
-  function tryParse(v) {
-    if (Array.isArray(v)) return v
-    try { return JSON.parse(v || '[]') } catch { return [] }
-  }
-
-  async function startSearch(e) {
-    e?.preventDefault()
-    const q = tool.trim()
-    if (!q) return
-
-    // Close existing SSE
-    sseRef.current?.close()
-    setResults([])
-    setSourcesDone([])
-    setTotal(0)
-    setStatus('running')
-
-    try {
-      const res = await fetch('/api/search', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tool_name: q }),
-      })
-      const data = await res.json()
-      setSearchId(data.search_id)
-      subscribeSSE(data.search_id)
-    } catch (err) {
-      setStatus('error')
-    }
-  }
-
-  function subscribeSSE(id) {
-    const es = new EventSource(`/api/search/${id}/stream`)
-    sseRef.current = es
-
-    es.onmessage = (e) => {
-      const msg = JSON.parse(e.data)
-
-      if (msg.type === 'result') {
-        const r = msg.data
-        r.tool_context = tryParse(r.tool_context)
-        setResults(prev => [...prev, r])
-      }
-      if (msg.type === 'status') {
-        setTotal(msg.total || 0)
-        setSourcesDone((msg.sources_done || '').split(',').filter(Boolean))
-      }
-      if (msg.type === 'done') {
-        setStatus('completed')
-        setTotal(msg.total || 0)
-        es.close()
-      }
-    }
-
-    es.onerror = () => {
-      setStatus('completed')
-      es.close()
-    }
-  }
-
-  // Cleanup on unmount
-  useEffect(() => () => sseRef.current?.close(), [])
-
-  // Filtered + sorted results
-  const filtered = results.filter(r => {
-    if (filters.sources.length && !filters.sources.includes(r.source)) return false
-    if (filters.contracts.length && !filters.contracts.includes(r.contract_type)) return false
-    if (filters.locations.length && !filters.locations.includes(r.location)) return false
-    return true
-  }).sort((a, b) => {
-    if (filters.sort === 'company') return (a.company_name || '').localeCompare(b.company_name || '')
-    if (filters.sort === 'title') return (a.job_title || '').localeCompare(b.job_title || '')
-    return (b.id || 0) - (a.id || 0) // recent = highest id first
+function buildOptionList(results, getter) {
+  const counts = new Map()
+  results.forEach((result) => {
+    const item = getter(result)
+    if (!item?.key && !item?.value) return
+    const value = item.key || item.value
+    const label = item.label || item.value || item.key
+    counts.set(value, { value, label, count: (counts.get(value)?.count || 0) + 1 })
   })
+  return [...counts.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label))
+}
 
-  const isRunning = status === 'running'
+function matchesLocalQuery(result, query) {
+  if (!query) return true
+  const haystack = [
+    result.job_title,
+    result.company_name,
+    result.location,
+    ...(result.tool_context || []),
+  ].join(' ').toLowerCase()
+  return haystack.includes(query.toLowerCase())
+}
+
+function formatSnippet(snippet) {
+  return (snippet || '')
+    .replace(/\*\*/g, '')
+    .replace(/`/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function SearchDetailPane({ result, onNavigate }) {
+  if (!result) {
+    return (
+      <aside className="detail-pane empty">
+        <p className="eyebrow">Overview</p>
+        <h3 className="detail-title">Selectionne une annonce</h3>
+        <p>Chaque carte ouvre ici un resume rapide avant de partir sur le site source.</p>
+      </aside>
+    )
+  }
+
+  const normalized = result.normalized || {}
+  const sourceLabel = SOURCE_META[normalized.source?.key]?.label || normalized.source?.label || result.source
 
   return (
-    <main className="max-w-6xl mx-auto px-4 sm:px-6 py-10">
-      {/* Hero */}
-      <div className="text-center mb-10">
-        <h1 className="text-4xl sm:text-5xl font-bold mb-3" style={{ color: '#2C3E50', letterSpacing: '-1px' }}>
-          Quelles entreprises utilisent{' '}
-          <span style={{ color: '#6B9BC8' }}>vos outils</span> ?
-        </h1>
-        <p className="text-base" style={{ color: '#7A90A4' }}>
-          Recherchez un outil SaaS et découvrez les offres d'emploi qui le mentionnent.
-        </p>
+    <aside className="detail-pane">
+      <div className="detail-pane-head">
+        <div className="detail-pane-copy">
+          <p className="eyebrow">{sourceLabel}</p>
+          <h3 className="detail-title">{result.job_title}</h3>
+          <p className="detail-company">{result.company_name || 'Entreprise non precisee'}</p>
+        </div>
+        <button
+          className="primary-button detail-cta"
+          onClick={() => window.open(result.job_url, '_blank', 'noopener,noreferrer')}
+        >
+          Voir l'annonce source
+        </button>
       </div>
 
-      {/* Search bar */}
-      <form onSubmit={startSearch} className="mb-6">
-        <div
-          className="flex items-center gap-3 rounded-2xl border px-4 py-3 shadow-sm transition-shadow focus-within:shadow-md"
-          style={{ background: '#fff', borderColor: '#D6DFF0' }}
-        >
-          <svg className="w-5 h-5 shrink-0" style={{ color: '#9AABB8' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-              d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-          </svg>
-          <input
-            className="flex-1 bg-transparent text-base outline-none placeholder-gray-400"
-            style={{ color: '#2C3E50' }}
-            placeholder="Ex : n8n, Make, Power BI, Airtable…"
-            value={tool}
-            onChange={e => setTool(e.target.value)}
-            disabled={isRunning}
-            autoFocus
-          />
-          <button
-            type="submit"
-            disabled={isRunning || !tool.trim()}
-            className="px-5 py-2 rounded-xl text-sm font-semibold text-white transition-opacity disabled:opacity-50"
-            style={{ background: 'linear-gradient(135deg, #6B9BC8, #7BBFAA)' }}
-          >
-            {isRunning ? 'Recherche…' : 'Rechercher'}
-          </button>
+      <div className="detail-metadata-grid">
+        <div>
+          <span>Contrat</span>
+          <strong>{normalized.contract?.label || result.contract_type || 'Non precise'}</strong>
         </div>
-      </form>
+        <div>
+          <span>Mode</span>
+          <strong>{normalized.remote_mode?.label || 'A verifier'}</strong>
+        </div>
+        <div>
+          <span>Niveau</span>
+          <strong>{normalized.seniority?.label || 'Non precise'}</strong>
+        </div>
+        <div>
+          <span>Ville</span>
+          <strong>{normalized.location?.label || result.location || 'Non precisee'}</strong>
+        </div>
+      </div>
 
-      {/* Popular tools */}
-      {status === 'idle' && (
-        <div className="flex flex-wrap gap-2 justify-center mb-8">
-          {POPULAR_TOOLS.map(t => (
-            <button
-              key={t}
-              onClick={() => { setTool(t); setTimeout(() => document.querySelector('form')?.requestSubmit(), 0) }}
-              className="px-3 py-1.5 rounded-full text-sm border transition-all hover:shadow-sm"
-              style={{ background: '#fff', color: '#6B7B90', borderColor: '#D6DFF0' }}
-            >
-              {t}
-            </button>
+      <section className="detail-section">
+        <header>
+          <h4>Extraits ou l'outil est cite</h4>
+          <small>Normalises pour filtrer plus vite</small>
+        </header>
+        <div className="detail-quote-list">
+          {(result.tool_context || []).map((snippet, index) => (
+            <blockquote key={`${result.id}-${index}`}>{formatSnippet(snippet)}</blockquote>
           ))}
         </div>
-      )}
+      </section>
 
-      {/* Progress */}
-      {isRunning && (
-        <div className="mb-6">
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-sm font-medium" style={{ color: '#6B7B90' }}>
-              Scraping en cours… {total > 0 && `${total} résultat${total > 1 ? 's' : ''} trouvé${total > 1 ? 's' : ''}`}
-            </span>
-            <div className="flex gap-2">
-              {ALL_SOURCES.map(s => (
-                <span
-                  key={s}
-                  className="px-2.5 py-0.5 rounded-full text-xs font-medium transition-all"
-                  style={
-                    sourcesDone.includes(s)
-                      ? { background: SOURCE_COLORS[s], color: '#fff' }
-                      : { background: '#EEF2F7', color: '#9AABB8' }
-                  }
+      <section className="detail-section">
+        <header>
+          <h4>Prochaines actions</h4>
+        </header>
+        <div className="detail-action-stack">
+          <button className="secondary-button" onClick={() => onNavigate('dashboard')}>
+            Classer dans mes candidatures
+          </button>
+          <button className="secondary-button" onClick={() => onNavigate('cv')}>
+            Preparer un CV cible
+          </button>
+          <button className="secondary-button" onClick={() => onNavigate('dashboard')}>
+            Ajouter a une veille
+          </button>
+        </div>
+      </section>
+    </aside>
+  )
+}
+
+export default function SearchPage({ onNavigate }) {
+  const {
+    tool,
+    results,
+    total,
+    status,
+    sourcesDone,
+    isRunning,
+    selectedResult,
+    selectedResultId,
+    startSearch,
+    selectResult,
+    clearSearch,
+  } = useSearch()
+  const { applications } = useApplications()
+  const [draftTool, setDraftTool] = useState(tool)
+  const [filters, setFilters] = useState({
+    query: '',
+    source: [],
+    contract: [],
+    remote: [],
+    seniority: [],
+    location: [],
+    sort: 'recent',
+  })
+
+  useEffect(() => {
+    setDraftTool(tool)
+  }, [tool])
+
+  const deferredResults = useDeferredValue(results)
+
+  const filterOptions = useMemo(() => ({
+    source: buildOptionList(deferredResults, (result) => {
+      const source = result.normalized?.source
+      if (!source) return null
+      return { ...source, label: SOURCE_META[source.key]?.label || source.label }
+    }),
+    contract: buildOptionList(deferredResults, (result) => result.normalized?.contract),
+    remote: buildOptionList(deferredResults, (result) => result.normalized?.remote_mode),
+    seniority: buildOptionList(deferredResults, (result) => result.normalized?.seniority),
+    location: buildOptionList(deferredResults, (result) => {
+      const city = result.normalized?.location?.city
+      return city ? { value: city, label: city } : null
+    }).slice(0, 12),
+  }), [deferredResults])
+
+  const filteredResults = useMemo(() => {
+    const visible = deferredResults.filter((result) => {
+      if (!matchesLocalQuery(result, filters.query)) return false
+      if (filters.source.length && !filters.source.includes(result.normalized?.source?.key)) return false
+      if (filters.contract.length && !filters.contract.includes(result.normalized?.contract?.key)) return false
+      if (filters.remote.length && !filters.remote.includes(result.normalized?.remote_mode?.key)) return false
+      if (filters.seniority.length && !filters.seniority.includes(result.normalized?.seniority?.key)) return false
+      if (filters.location.length && !filters.location.includes(result.normalized?.location?.city)) return false
+      return true
+    })
+
+    return visible.sort((left, right) => {
+      if (filters.sort === 'company') return (left.company_name || '').localeCompare(right.company_name || '')
+      if (filters.sort === 'title') return (left.job_title || '').localeCompare(right.job_title || '')
+      return (right.id || 0) - (left.id || 0)
+    })
+  }, [deferredResults, filters])
+
+  const displayedSelectedResult =
+    filteredResults.find((result) => result.id === selectedResultId) ||
+    selectedResult ||
+    filteredResults[0] ||
+    null
+
+  const statusCopy = isRunning
+    ? `La recherche continue meme si tu changes d'onglet ou de page. ${sourcesDone.length}/4 sources terminees.`
+    : total > 0
+      ? `${total} annonces remontees. Les filtres utilisent des categories normalisees pour eviter les doublons.`
+      : 'Lance une recherche et garde une vue synthetique de chaque annonce avant de partir sur le site source.'
+
+  const sourceCards = Object.entries(SOURCE_META).map(([key, meta]) => ({
+    key,
+    ...meta,
+    done: sourcesDone.includes(key),
+  }))
+
+  return (
+    <main className="workspace-page">
+      <section className="search-dashboard-hero">
+        <div className="command-center-card">
+          <div className="command-center-head">
+            <div className="workspace-title-block compact dark command-center-copy">
+              <p className="eyebrow is-light">Command center</p>
+              <h1>Recherche active</h1>
+              <p className="lede is-light">{statusCopy}</p>
+            </div>
+            <div className="command-center-kpis">
+              <div className="mini-metric">
+                <span>Run</span>
+                <strong>{tool || 'Nouveau'}</strong>
+              </div>
+              <div className="mini-metric">
+                <span>Statut</span>
+                <strong>{isRunning ? 'En cours' : status === 'completed' ? 'Termine' : 'Pret'}</strong>
+              </div>
+            </div>
+          </div>
+
+          <form
+            className="search-command-form"
+            onSubmit={(event) => {
+              event.preventDefault()
+              startSearch(draftTool)
+            }}
+          >
+            <label className="field-stack grow dark">
+              <span>Outil a detecter dans les annonces</span>
+              <input
+                value={draftTool}
+                onChange={(event) => setDraftTool(event.target.value)}
+                placeholder="Power BI, Make, HubSpot, dbt"
+              />
+            </label>
+            <button className="primary-button light" type="submit" disabled={!draftTool.trim() || isRunning}>
+              {isRunning ? 'Scraping en cours' : 'Lancer la recherche'}
+            </button>
+            <button className="secondary-button dark" type="button" onClick={clearSearch}>
+              Reinitialiser
+            </button>
+          </form>
+
+          <div className="popular-strip dark">
+            {POPULAR_TOOLS.map((item) => (
+              <button
+                key={item}
+                className="filter-chip dark"
+                onClick={() => {
+                  setDraftTool(item)
+                  startSearch(item)
+                }}
+              >
+                <span>{item}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="search-overview-stack">
+          <div className="overview-grid">
+            <div className="overview-card tone-blue">
+              <span>Resultats visibles</span>
+              <strong>{filteredResults.length}</strong>
+            </div>
+            <div className="overview-card tone-green">
+              <span>Sources terminees</span>
+              <strong>{sourcesDone.length}/4</strong>
+            </div>
+            <div className="overview-card tone-yellow">
+              <span>Candidatures</span>
+              <strong>{applications.length}</strong>
+            </div>
+          </div>
+
+          <div className="run-health-card">
+            <div className="panel-head compact">
+              <div>
+                <p className="eyebrow">Run health</p>
+                <h2>Etat des scrapers</h2>
+              </div>
+              <button className="text-action inverted" onClick={() => onNavigate('history')}>
+                Historique
+              </button>
+            </div>
+
+            <div className="source-health-grid">
+              {sourceCards.map((item) => (
+                <div
+                  key={item.key}
+                  className={`source-health-card ${item.done ? 'is-done' : ''}`}
+                  style={{ '--source-color': item.color, '--source-background': item.background }}
                 >
-                  {sourcesDone.includes(s) ? '✓ ' : ''}{SOURCE_STATUS_LABELS[s]}
-                </span>
+                  <div className="source-health-head">
+                    <span>{item.label}</span>
+                    <span className="status-dot" />
+                  </div>
+                  <strong>{item.done ? 'Termine' : isRunning ? 'Actif' : 'Pret'}</strong>
+                </div>
               ))}
             </div>
           </div>
-          {/* Animated bar */}
-          <div className="h-1 rounded-full overflow-hidden" style={{ background: '#D6DFF0' }}>
-            <div
-              className="h-full rounded-full transition-all duration-500"
-              style={{
-                width: `${(sourcesDone.length / ALL_SOURCES.length) * 100}%`,
-                background: 'linear-gradient(90deg, #6B9BC8, #7BBFAA)',
-              }}
-            />
-          </div>
         </div>
-      )}
+      </section>
 
-      {/* Results layout */}
-      {results.length > 0 && (
-        <div className="flex gap-6 items-start">
-          {/* Sidebar filters */}
-          <aside className="hidden lg:block w-64 shrink-0 sticky top-20">
-            <FilterBar results={results} filters={filters} setFilters={setFilters} />
-          </aside>
+      <section className="workspace-grid">
+        <FilterBar
+          filters={filters}
+          setFilters={setFilters}
+          options={filterOptions}
+          resultCount={filteredResults.length}
+        />
 
-          {/* Cards */}
-          <div className="flex-1 min-w-0">
-            {/* Result count */}
-            <div className="flex items-center justify-between mb-4">
-              <p className="text-sm font-medium" style={{ color: '#7A90A4' }}>
-                {filtered.length} offre{filtered.length > 1 ? 's' : ''}
-                {filtered.length !== results.length && ` (sur ${results.length})`}
-              </p>
-              {/* Mobile filter toggle could go here */}
+        <section className="results-column">
+          <div className="results-column-head">
+            <div className="section-copy">
+              <p className="eyebrow">Run actif</p>
+              <p className="section-title">{tool || 'Aucune recherche active'}</p>
             </div>
-
-            {filtered.length === 0 ? (
-              <div
-                className="rounded-2xl border p-10 text-center"
-                style={{ background: '#fff', borderColor: '#D6DFF0' }}
-              >
-                <p style={{ color: '#9AABB8' }}>Aucune offre ne correspond aux filtres sélectionnés.</p>
-              </div>
-            ) : (
-              <div className="grid gap-4 sm:grid-cols-1 xl:grid-cols-2">
-                {filtered.map(r => (
-                  <JobCard key={r.id} result={r} />
-                ))}
-              </div>
-            )}
-
-            {/* Streaming indicator */}
-            {isRunning && results.length > 0 && (
-              <div className="text-center mt-6 text-sm" style={{ color: '#9AABB8' }}>
-                <span className="inline-block animate-pulse">● Nouvelles offres en cours…</span>
-              </div>
-            )}
+            <div className="results-head-actions">
+              <span className={`inline-badge ${status === 'completed' ? 'is-selected' : ''}`}>
+                {status === 'running' ? 'En cours' : status === 'completed' ? 'Termine' : 'En attente'}
+              </span>
+              <button className="text-action" onClick={() => onNavigate('history')}>
+                Voir les runs
+              </button>
+            </div>
           </div>
-        </div>
-      )}
 
-      {/* Empty state after completed */}
-      {status === 'completed' && results.length === 0 && (
-        <div
-          className="rounded-2xl border p-14 text-center"
-          style={{ background: '#fff', borderColor: '#D6DFF0' }}
-        >
-          <p className="text-5xl mb-4">🔍</p>
-          <p className="text-lg font-semibold mb-1" style={{ color: '#2C3E50' }}>Aucun résultat trouvé</p>
-          <p className="text-sm" style={{ color: '#9AABB8' }}>
-            Essayez un nom d'outil différent ou vérifiez l'orthographe.
-          </p>
-        </div>
-      )}
+          <div className="result-stream-note">
+            <div className="status-dot" />
+            <span>{isRunning ? 'Le flux continue en arriere-plan.' : 'Le resultat reste restaurable apres refresh.'}</span>
+          </div>
 
-      {/* Completion banner */}
-      {status === 'completed' && results.length > 0 && (
-        <div
-          className="mt-6 rounded-2xl border px-5 py-3 flex items-center gap-3"
-          style={{ background: '#E8F4EC', borderColor: '#A8D5BC' }}
-        >
-          <span className="text-lg">✅</span>
-          <p className="text-sm font-medium" style={{ color: '#2E7D52' }}>
-            Scraping terminé — {total} offre{total > 1 ? 's' : ''} trouvée{total > 1 ? 's' : ''} sur {sourcesDone.join(', ')}.
-          </p>
-        </div>
-      )}
+          {filteredResults.length === 0 ? (
+            <div className="empty-panel">
+              <p className="eyebrow">Aucune carte</p>
+              <h3>{status === 'completed' ? 'Rien ne correspond a ces filtres.' : 'Lance une recherche pour remplir le board.'}</h3>
+              <p>Les cartes deviennent cliquables des que les premiers resultats arrivent.</p>
+            </div>
+          ) : (
+            <div className="job-card-list">
+              {filteredResults.map((result, index) => (
+                <div key={result.id} className="fade-stagger" style={{ '--index': index }}>
+                  <JobCard
+                    result={result}
+                    isActive={selectedResultId === result.id}
+                    onOpen={(item) => selectResult(item.id)}
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        <SearchDetailPane result={displayedSelectedResult} onNavigate={onNavigate} />
+      </section>
     </main>
   )
 }

@@ -1,110 +1,123 @@
-function MultiSelect({ label, options, value, onChange }) {
+function FilterGroup({ title, options, values, onToggle }) {
+  if (!options.length) return null
+
   return (
-    <div>
-      <p className="text-xs font-semibold uppercase tracking-wider mb-2" style={{ color: '#9AABB8' }}>
-        {label}
-      </p>
-      <div className="flex flex-wrap gap-1.5">
-        {options.map(opt => {
-          const active = value.includes(opt.value)
+    <section className="filter-group">
+      <header className="filter-group-head">
+        <p className="filter-group-title">{title}</p>
+      </header>
+
+      <div className="filter-chip-list">
+        {options.map((option) => {
+          const active = values.includes(option.value)
           return (
             <button
-              key={opt.value}
-              onClick={() =>
-                onChange(active ? value.filter(v => v !== opt.value) : [...value, opt.value])
-              }
-              className="px-3 py-1 rounded-full text-xs font-medium border transition-all"
-              style={
-                active
-                  ? { background: '#6B9BC8', color: '#fff', borderColor: '#6B9BC8' }
-                  : { background: '#fff', color: '#6B7B90', borderColor: '#D6DFF0' }
-              }
+              key={option.value}
+              className={`filter-chip ${active ? 'is-active' : ''}`}
+              onClick={() => onToggle(option.value)}
+              title={option.label}
             >
-              {opt.label} {opt.count !== undefined && `(${opt.count})`}
+              <span>{option.label}</span>
+              <small>{option.count}</small>
             </button>
           )
         })}
       </div>
-    </div>
+    </section>
   )
 }
 
-export default function FilterBar({ results, filters, setFilters }) {
-  // Build option lists from current results
-  const sources = [...new Set(results.map(r => r.source).filter(Boolean))]
-  const contracts = [...new Set(results.map(r => r.contract_type).filter(Boolean))].sort()
-  const locations = [...new Set(results.map(r => r.location).filter(Boolean))].sort()
-
-  const sourceLabels = { wttj: 'WTTJ', indeed: 'Indeed', jobteaser: 'Jobteaser' }
-
-  function count(field, val) {
-    return results.filter(r => r[field] === val).length
+export default function FilterBar({ filters, setFilters, options, resultCount }) {
+  const updateSet = (field, value) => {
+    setFilters((prev) => {
+      const current = prev[field]
+      return {
+        ...prev,
+        [field]: current.includes(value)
+          ? current.filter((item) => item !== value)
+          : [...current, value],
+      }
+    })
   }
 
-  const sortOpts = [
-    { value: 'recent', label: 'Plus récent' },
-    { value: 'company', label: 'Entreprise A→Z' },
-    { value: 'title', label: 'Titre A→Z' },
-  ]
+  const clearFilters = () => {
+    setFilters((prev) => ({
+      ...prev,
+      source: [],
+      contract: [],
+      remote: [],
+      seniority: [],
+      location: [],
+      query: '',
+    }))
+  }
 
   return (
-    <div
-      className="rounded-2xl border p-5 space-y-5"
-      style={{ background: '#fff', borderColor: '#D6DFF0' }}
-    >
-      <div className="flex items-center justify-between">
-        <h2 className="font-semibold text-sm" style={{ color: '#2C3E50' }}>Filtres</h2>
-        {(filters.sources.length > 0 || filters.contracts.length > 0 || filters.locations.length > 0) && (
-          <button
-            onClick={() => setFilters({ sources: [], contracts: [], locations: [], sort: filters.sort })}
-            className="text-xs underline"
-            style={{ color: '#9AABB8' }}
-          >
-            Effacer
-          </button>
-        )}
+    <aside className="filter-sidebar">
+      <div className="filter-sidebar-head">
+        <div>
+          <p className="eyebrow">Filtrage</p>
+          <div className="filter-sidebar-stat">
+            <strong>{resultCount}</strong>
+            <span>cartes visibles</span>
+          </div>
+        </div>
+        <button className="secondary-button filter-reset-button" onClick={clearFilters}>
+          Reinitialiser
+        </button>
       </div>
 
-      {/* Sort */}
-      <div>
-        <p className="text-xs font-semibold uppercase tracking-wider mb-2" style={{ color: '#9AABB8' }}>Trier</p>
+      <label className="field-stack">
+        <span>Recherche locale</span>
+        <input
+          value={filters.query}
+          onChange={(event) => setFilters((prev) => ({ ...prev, query: event.target.value }))}
+          placeholder="Titre, entreprise, extrait"
+        />
+      </label>
+
+      <label className="field-stack">
+        <span>Trier</span>
         <select
           value={filters.sort}
-          onChange={e => setFilters({ ...filters, sort: e.target.value })}
-          className="w-full rounded-lg border px-3 py-1.5 text-sm focus:outline-none"
-          style={{ borderColor: '#D6DFF0', color: '#2C3E50' }}
+          onChange={(event) => setFilters((prev) => ({ ...prev, sort: event.target.value }))}
         >
-          {sortOpts.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+          <option value="recent">Plus recent</option>
+          <option value="company">Entreprise A-Z</option>
+          <option value="title">Titre A-Z</option>
         </select>
-      </div>
+      </label>
 
-      {/* Source */}
-      <MultiSelect
-        label="Source"
-        options={sources.map(s => ({ value: s, label: sourceLabels[s] || s, count: count('source', s) }))}
-        value={filters.sources}
-        onChange={v => setFilters({ ...filters, sources: v })}
+      <FilterGroup
+        title="Sources"
+        options={options.source}
+        values={filters.source}
+        onToggle={(value) => updateSet('source', value)}
       />
-
-      {/* Contract */}
-      {contracts.length > 0 && (
-        <MultiSelect
-          label="Contrat"
-          options={contracts.map(c => ({ value: c, label: c, count: count('contract_type', c) }))}
-          value={filters.contracts}
-          onChange={v => setFilters({ ...filters, contracts: v })}
-        />
-      )}
-
-      {/* Location */}
-      {locations.length > 0 && (
-        <MultiSelect
-          label="Lieu"
-          options={locations.slice(0, 10).map(l => ({ value: l, label: l, count: count('location', l) }))}
-          value={filters.locations}
-          onChange={v => setFilters({ ...filters, locations: v })}
-        />
-      )}
-    </div>
+      <FilterGroup
+        title="Contrats"
+        options={options.contract}
+        values={filters.contract}
+        onToggle={(value) => updateSet('contract', value)}
+      />
+      <FilterGroup
+        title="Mode"
+        options={options.remote}
+        values={filters.remote}
+        onToggle={(value) => updateSet('remote', value)}
+      />
+      <FilterGroup
+        title="Niveau"
+        options={options.seniority}
+        values={filters.seniority}
+        onToggle={(value) => updateSet('seniority', value)}
+      />
+      <FilterGroup
+        title="Villes"
+        options={options.location}
+        values={filters.location}
+        onToggle={(value) => updateSet('location', value)}
+      />
+    </aside>
   )
 }

@@ -1,3 +1,4 @@
+import logging
 import re
 import time
 import requests
@@ -58,6 +59,15 @@ TECH_SIGNALS = re.compile(
     r")\b"
 )
 
+AMBIGUOUS_TOOL_SIGNALS: dict[str, re.Pattern[str]] = {
+    "make": re.compile(
+        r"(?i)\b("
+        r"make\.com|integromat|automation|workflow|webhook|scenario|"
+        r"module|no.code|nocode|zapier|n8n|crm|api|integration"
+        r")\b"
+    ),
+}
+
 DEFAULT_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -95,6 +105,7 @@ class BaseScraper:
     DELAY = 1.5  # seconds between requests
 
     def __init__(self, cookies: dict | None = None):
+        self.log = logging.getLogger(f"toolscout.scrapers.{self.SOURCE}")
         self.session = requests.Session()
         self.session.headers.update(DEFAULT_HEADERS)
         if cookies:
@@ -130,6 +141,7 @@ class BaseScraper:
         combined = re.compile(r"(?i)\b(" + "|".join(patterns) + r")\b")
 
         is_ambiguous = tool_lower in AMBIGUOUS_TOOLS
+        signal_pattern = AMBIGUOUS_TOOL_SIGNALS.get(tool_lower, TECH_SIGNALS)
 
         # Split text into sentences/bullets
         chunks = re.split(r"[\n•\-–—]|(?<=[.!?])\s+", text)
@@ -147,14 +159,14 @@ class BaseScraper:
                 # Extra check: the tool name must appear as a standalone tech tool
                 # (not as part of a brand name like "Make My Lemonade")
                 # We look for tech signals in the immediate vicinity
-                if not TECH_SIGNALS.search(stripped):
+                if not signal_pattern.search(stripped):
                     # Check broader context: look for tech signal within 200 chars of the match
                     m = combined.search(stripped)
                     if m:
                         start = max(0, m.start() - 100)
                         end = min(len(text), m.end() + 100)
                         context_window = text[start:end]
-                        if not TECH_SIGNALS.search(context_window):
+                        if not signal_pattern.search(context_window):
                             continue
 
             relevant.append(stripped)
@@ -176,7 +188,7 @@ class BaseScraper:
             resp.raise_for_status()
             return resp
         except Exception as e:
-            print(f"[{self.SOURCE}] GET {url} failed: {e}")
+            self.log.warning("GET %s failed: %s", url, e)
             return None
 
     def sleep(self):

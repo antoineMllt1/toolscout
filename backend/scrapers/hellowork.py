@@ -72,7 +72,7 @@ class HelloWorkScraper(BaseScraper):
                 jobs = data.get("data", {}).get("results", [])
 
             if not jobs:
-                print(f"[hellowork] No jobs in response (page {page}). Keys: {list(data.keys())}")
+                self.log.info("No jobs in response for page=%s keys=%s", page, list(data.keys()))
                 break
 
             for job in jobs:
@@ -115,7 +115,7 @@ class HelloWorkScraper(BaseScraper):
             resp.raise_for_status()
             return resp
         except Exception as e:
-            print(f"[hellowork] POST {url} failed: {e}")
+            self.log.warning("POST %s failed: %s", url, e)
             return None
 
     def _extract_description(self, job: dict) -> str:

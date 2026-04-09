@@ -1,24 +1,37 @@
 @echo off
+setlocal
+
 echo ===================================
-echo  ToolScout - Demarrage du serveur
+echo  ToolScout - Demarrage local
 echo ===================================
 echo.
 
-echo [1/3] Installation des dependances Python...
+echo [STEP 1/3] Python dependencies
 pip install -r "%~dp0backend\requirements.txt" --quiet
+if errorlevel 1 goto :error
 
 echo.
-echo [2/3] Build du frontend React...
+echo [STEP 2/3] Frontend build
 cd /d "%~dp0frontend-react"
 call npm install --silent
+if errorlevel 1 goto :error
 call npm run build
+if errorlevel 1 goto :error
 
 echo.
-echo [3/3] Lancement du serveur sur http://127.0.0.1:8000
-echo.
-echo Ouvrez votre navigateur sur : http://127.0.0.1:8000
-echo Appuyez sur Ctrl+C pour arreter.
+echo [STEP 3/3] Backend startup
+echo URL    : http://127.0.0.1:8000
+echo Logs   : backend + uvicorn en format structure, access logs desactives
+echo Reload : les fichiers SQLite sont exclus pour eviter les redemarrages pendant le scraping
+echo Stop   : Ctrl+C
 echo.
 
+set PYTHONUNBUFFERED=1
 cd /d "%~dp0backend"
-python -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload
+python -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload --no-access-log --reload-exclude data.db --reload-exclude "*.db" --reload-exclude "*.db-*" --reload-exclude "__pycache__" --log-config logging.json
+goto :eof
+
+:error
+echo.
+echo [ERROR] Startup aborted. Check the command output above.
+exit /b 1

@@ -1,43 +1,57 @@
-import { useState } from 'react'
+import { startTransition, useEffect, useState } from 'react'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import { ApplicationProvider } from './context/ApplicationContext'
+import { SearchProvider, useSearch } from './context/SearchContext'
 import SearchPage from './pages/SearchPage'
 import HistoryPage from './pages/HistoryPage'
 import DashboardPage from './pages/DashboardPage'
 import AuthPage from './pages/AuthPage'
+import CvStudioPage from './pages/CvStudioPage'
 import Navbar from './components/Navbar'
 import './index.css'
 
+const PAGE_STORAGE_KEY = 'ts_active_page_v2'
+
 function AppInner() {
   const { loading } = useAuth()
-  const [page, setPage] = useState('search')
-  const [historySearch, setHistorySearch] = useState(null)
+  const { openSearch } = useSearch()
+  const [page, setPage] = useState(() => localStorage.getItem(PAGE_STORAGE_KEY) || 'search')
+
+  useEffect(() => {
+    localStorage.setItem(PAGE_STORAGE_KEY, page)
+  }, [page])
+
+  const navigate = (nextPage) => {
+    startTransition(() => {
+      setPage(nextPage)
+    })
+  }
+
+  const openHistorySearch = (searchId) => {
+    openSearch(searchId)
+    navigate('search')
+  }
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center" style={{ background: '#EEF2F7' }}>
-        <div className="w-10 h-10 rounded-2xl animate-pulse" style={{ background: 'linear-gradient(135deg, #6B9BC8, #7BBFAA)' }} />
+      <div className="app-loading-shell">
+        <div className="app-loading-mark" />
+        <p>Chargement de votre dashboard.</p>
       </div>
     )
   }
 
   if (page === 'auth') {
-    return <AuthPage onSuccess={() => setPage('search')} />
-  }
-
-  function goToSearch(searchId) {
-    setHistorySearch(searchId)
-    setPage('search')
+    return <AuthPage onSuccess={() => navigate('search')} />
   }
 
   return (
-    <div className="min-h-screen" style={{ background: '#EEF2F7' }}>
-      <Navbar page={page} setPage={setPage} />
-      {page === 'search' && (
-        <SearchPage initialSearchId={historySearch} onClearInitial={() => setHistorySearch(null)} />
-      )}
-      {page === 'history' && <HistoryPage onOpen={goToSearch} />}
-      {page === 'dashboard' && <DashboardPage />}
+    <div className="app-shell">
+      <Navbar page={page} onNavigate={navigate} />
+      {page === 'search' && <SearchPage onNavigate={navigate} />}
+      {page === 'history' && <HistoryPage onOpen={openHistorySearch} />}
+      {page === 'dashboard' && <DashboardPage onNavigate={navigate} />}
+      {page === 'cv' && <CvStudioPage onNavigate={navigate} />}
     </div>
   )
 }
@@ -46,7 +60,9 @@ export default function App() {
   return (
     <AuthProvider>
       <ApplicationProvider>
-        <AppInner />
+        <SearchProvider>
+          <AppInner />
+        </SearchProvider>
       </ApplicationProvider>
     </AuthProvider>
   )

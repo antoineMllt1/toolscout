@@ -35,4 +35,4 @@ WORKDIR /app/backend
 EXPOSE 8080
 
 # Railway injects $PORT dynamically; fallback to 8080 for local Docker
-CMD uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}
+CMD uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080} --log-config logging.json

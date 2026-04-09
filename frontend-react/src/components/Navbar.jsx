@@ -1,119 +1,99 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useAuth } from '../context/AuthContext'
 import { useApplications } from '../context/ApplicationContext'
+import { useSearch } from '../context/SearchContext'
 
-export default function Navbar({ page, setPage }) {
+export default function Navbar({ page, onNavigate }) {
   const { user, logout } = useAuth()
   const { applications } = useApplications()
+  const { hasActiveSearch, isRunning, total, tool } = useSearch()
   const [menuOpen, setMenuOpen] = useState(false)
 
-  const savedCount = applications.length
-
-  const navLinks = [
-    { id: 'search',    label: 'Recherche' },
-    { id: 'history',   label: 'Historique' },
-    ...(user ? [{ id: 'dashboard', label: `Mes candidatures${savedCount > 0 ? ` (${savedCount})` : ''}` }] : []),
-  ]
+  const navItems = useMemo(() => ([
+    { id: 'search', label: 'Recherche' },
+    { id: 'history', label: 'Runs' },
+    ...(user ? [{ id: 'cv', label: 'CV Studio' }] : []),
+    ...(user ? [{ id: 'dashboard', label: 'Cockpit' }] : []),
+  ]), [user])
 
   return (
-    <nav
-      className="sticky top-0 z-50 border-b"
-      style={{ background: 'rgba(238,242,247,0.92)', backdropFilter: 'blur(12px)', borderColor: '#D6DFF0' }}
-    >
-      <div className="max-w-6xl mx-auto px-4 sm:px-6 flex items-center justify-between h-14">
-        {/* Logo */}
-        <button
-          onClick={() => setPage('search')}
-          className="flex items-center gap-2 font-bold text-lg tracking-tight"
-          style={{ color: '#4A7DB5' }}
-        >
-          <span
-            className="w-7 h-7 rounded-lg flex items-center justify-center text-white text-sm font-bold"
-            style={{ background: 'linear-gradient(135deg, #6B9BC8, #7BBFAA)' }}
-          >
-            T
+    <header className="topbar">
+      <div className="topbar-inner">
+        <button className="brand" onClick={() => onNavigate('search')}>
+          <span className="brand-mark">TS</span>
+          <span>
+            <strong>ToolScout</strong>
+            <small>Student search cockpit</small>
           </span>
-          ToolScout
         </button>
 
-        {/* Nav links */}
-        <div className="flex items-center gap-1">
-          {navLinks.map(({ id, label }) => (
+        <nav className="topbar-nav" aria-label="Primary">
+          {navItems.map((item) => (
             <button
-              key={id}
-              onClick={() => setPage(id)}
-              className="px-4 py-1.5 rounded-full text-sm font-medium transition-all"
-              style={
-                page === id
-                  ? { background: '#6B9BC8', color: '#fff' }
-                  : { color: '#6B7B90' }
-              }
+              key={item.id}
+              className={`topbar-link ${page === item.id ? 'is-active' : ''}`}
+              onClick={() => onNavigate(item.id)}
             >
-              {label}
+              {item.label}
             </button>
           ))}
-        </div>
+        </nav>
 
-        {/* Auth section */}
-        <div className="relative">
+        <div className="topbar-meta">
+          {hasActiveSearch && (
+            <div className={`topbar-status ${isRunning ? 'is-running' : ''}`}>
+              <span className="status-dot" />
+              <span>{isRunning ? `Recherche en cours - ${tool}` : `${total} annonces - ${tool}`}</span>
+            </div>
+          )}
+
           {user ? (
-            <div>
-              <button
-                onClick={() => setMenuOpen(!menuOpen)}
-                className="flex items-center gap-2 px-3 py-1.5 rounded-full border text-sm font-medium transition-all hover:shadow-sm"
-                style={{ background: '#fff', borderColor: '#D6DFF0', color: '#2C3E50' }}
-              >
-                <span
-                  className="w-6 h-6 rounded-full flex items-center justify-center text-white text-xs font-bold shrink-0"
-                  style={{ background: 'linear-gradient(135deg, #6B9BC8, #7BBFAA)' }}
-                >
-                  {(user.name || user.email)[0].toUpperCase()}
+            <div className="account-menu">
+              <button className="account-trigger" onClick={() => setMenuOpen((open) => !open)}>
+                <span className="account-avatar">{(user.name || user.email).slice(0, 2).toUpperCase()}</span>
+                <span className="account-copy">
+                  <strong>{user.name || 'Compte'}</strong>
+                  <small>{applications.length} candidatures</small>
                 </span>
-                <span className="hidden sm:block max-w-[120px] truncate">
-                  {user.name || user.email}
-                </span>
-                <svg className="w-3 h-3 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                </svg>
               </button>
 
               {menuOpen && (
-                <div
-                  className="absolute right-0 mt-2 w-48 rounded-2xl border shadow-lg overflow-hidden z-50"
-                  style={{ background: '#fff', borderColor: '#D6DFF0' }}
-                >
-                  <div className="px-4 py-3 border-b" style={{ borderColor: '#EEF2F7' }}>
-                    <p className="text-xs font-semibold" style={{ color: '#2C3E50' }}>{user.name || 'Mon compte'}</p>
-                    <p className="text-xs truncate" style={{ color: '#9AABB8' }}>{user.email}</p>
-                  </div>
+                <div className="account-popover">
                   <button
-                    onClick={() => { setPage('dashboard'); setMenuOpen(false) }}
-                    className="w-full text-left px-4 py-2.5 text-sm hover:bg-gray-50 transition-colors"
-                    style={{ color: '#2C3E50' }}
+                    onClick={() => {
+                      onNavigate('cv')
+                      setMenuOpen(false)
+                    }}
                   >
-                    📋 Mes candidatures
+                    Ouvrir CV Studio
                   </button>
                   <button
-                    onClick={() => { logout(); setMenuOpen(false); setPage('search') }}
-                    className="w-full text-left px-4 py-2.5 text-sm hover:bg-gray-50 transition-colors border-t"
-                    style={{ color: '#9B2E2E', borderColor: '#EEF2F7' }}
+                    onClick={() => {
+                      onNavigate('dashboard')
+                      setMenuOpen(false)
+                    }}
                   >
-                    Se déconnecter
+                    Ouvrir le cockpit
+                  </button>
+                  <button
+                    onClick={() => {
+                      logout()
+                      setMenuOpen(false)
+                      onNavigate('search')
+                    }}
+                  >
+                    Se deconnecter
                   </button>
                 </div>
               )}
             </div>
           ) : (
-            <button
-              onClick={() => setPage('auth')}
-              className="px-4 py-1.5 rounded-full text-sm font-medium border transition-all hover:shadow-sm"
-              style={{ background: '#fff', borderColor: '#D6DFF0', color: '#6B7B90' }}
-            >
+            <button className="topbar-ghost" onClick={() => onNavigate('auth')}>
               Connexion
             </button>
           )}
         </div>
       </div>
-    </nav>
+    </header>
   )
 }

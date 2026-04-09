@@ -1,25 +1,37 @@
 import { useState } from 'react'
 import { useAuth } from '../context/AuthContext'
 
+const AUTH_BENEFITS = [
+  {
+    title: 'Recherche persistante',
+    text: 'Un scraping continue meme si tu changes de page, et le run reste restaurable ensuite.',
+  },
+  {
+    title: 'CV cible par annonce',
+    text: 'La base template est deja la pour brancher des variantes CV, lettre et score de match.',
+  },
+  {
+    title: 'CRM de postulation',
+    text: 'Tu gardes un pipeline clair entre cartes a relire, candidatures envoyees et entretiens.',
+  },
+]
+
 export default function AuthPage({ onSuccess }) {
   const { login, register } = useAuth()
-  const [mode, setMode] = useState('login')   // login | register
+  const [mode, setMode] = useState('login')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [name, setName] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
-  async function handleSubmit(e) {
-    e.preventDefault()
+  async function handleSubmit(event) {
+    event.preventDefault()
     setError('')
     setLoading(true)
     try {
-      if (mode === 'login') {
-        await login(email, password)
-      } else {
-        await register(email, password, name)
-      }
+      if (mode === 'login') await login(email, password)
+      else await register(email, password, name)
       onSuccess?.()
     } catch (err) {
       setError(err.message)
@@ -29,105 +41,106 @@ export default function AuthPage({ onSuccess }) {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-4" style={{ background: '#EEF2F7' }}>
-      <div className="w-full max-w-sm">
-        {/* Logo */}
-        <div className="text-center mb-8">
-          <div
-            className="w-12 h-12 rounded-2xl flex items-center justify-center text-white text-xl font-bold mx-auto mb-3"
-            style={{ background: 'linear-gradient(135deg, #6B9BC8, #7BBFAA)' }}
-          >
-            T
+    <main className="auth-page">
+      <section className="auth-layout">
+        <article className="auth-showcase fade-stagger" style={{ '--index': 0 }}>
+          <div className="brand auth-brand">
+            <span className="brand-mark">TS</span>
+            <span>
+              <strong>ToolScout</strong>
+              <small>Student search cockpit</small>
+            </span>
           </div>
-          <h1 className="text-2xl font-bold" style={{ color: '#2C3E50' }}>ToolScout</h1>
-          <p className="text-sm mt-1" style={{ color: '#7A90A4' }}>
-            {mode === 'login' ? 'Connectez-vous à votre compte' : 'Créez votre compte'}
-          </p>
-        </div>
 
-        <div
-          className="rounded-2xl border p-8"
-          style={{ background: '#fff', borderColor: '#D6DFF0' }}
-        >
-          <form onSubmit={handleSubmit} className="space-y-4">
-            {mode === 'register' && (
-              <div>
-                <label className="block text-sm font-medium mb-1.5" style={{ color: '#5A6B7B' }}>
-                  Prénom / Nom
-                </label>
-                <input
-                  type="text"
-                  value={name}
-                  onChange={e => setName(e.target.value)}
-                  placeholder="Jean Dupont"
-                  className="w-full rounded-xl border px-4 py-2.5 text-sm outline-none focus:ring-2 transition-shadow"
-                  style={{ borderColor: '#D6DFF0', color: '#2C3E50' }}
-                />
-              </div>
-            )}
+          <div className="hero-copy">
+            <p className="eyebrow is-light">Premium workspace</p>
+            <h1 className="auth-display">Pilote ta recherche de stage comme un vrai pipeline.</h1>
+            <p className="lede is-light">
+              Un seul espace pour chercher des offres, preparer un CV cible par poste et suivre chaque candidature
+              jusqu'a la reponse finale.
+            </p>
+          </div>
 
-            <div>
-              <label className="block text-sm font-medium mb-1.5" style={{ color: '#5A6B7B' }}>
-                Email
-              </label>
-              <input
-                type="email"
-                value={email}
-                onChange={e => setEmail(e.target.value)}
-                placeholder="vous@exemple.com"
-                required
-                className="w-full rounded-xl border px-4 py-2.5 text-sm outline-none focus:ring-2 transition-shadow"
-                style={{ borderColor: '#D6DFF0', color: '#2C3E50' }}
-              />
-            </div>
+          <ul className="auth-feature-list">
+            {AUTH_BENEFITS.map((item) => (
+              <li key={item.title}>
+                <strong>{item.title}</strong>
+                <span>{item.text}</span>
+              </li>
+            ))}
+          </ul>
+        </article>
 
-            <div>
-              <label className="block text-sm font-medium mb-1.5" style={{ color: '#5A6B7B' }}>
-                Mot de passe
-              </label>
-              <input
-                type="password"
-                value={password}
-                onChange={e => setPassword(e.target.value)}
-                placeholder={mode === 'register' ? 'Minimum 6 caractères' : '••••••••'}
-                required
-                className="w-full rounded-xl border px-4 py-2.5 text-sm outline-none focus:ring-2 transition-shadow"
-                style={{ borderColor: '#D6DFF0', color: '#2C3E50' }}
-              />
-            </div>
-
-            {error && (
-              <div
-                className="rounded-xl border px-4 py-2.5 text-sm"
-                style={{ background: '#FEF0E8', borderColor: '#F5C6A8', color: '#B05A2A' }}
-              >
-                {error}
-              </div>
-            )}
-
+        <section className="auth-panel auth-form-panel fade-stagger" style={{ '--index': 1 }}>
+          <div className="auth-mode-switch" role="tablist" aria-label="Authentication mode">
             <button
-              type="submit"
-              disabled={loading}
-              className="w-full py-2.5 rounded-xl text-white text-sm font-semibold transition-opacity disabled:opacity-60"
-              style={{ background: 'linear-gradient(135deg, #6B9BC8, #7BBFAA)' }}
+              type="button"
+              className={`auth-mode-chip ${mode === 'login' ? 'is-active' : ''}`}
+              onClick={() => setMode('login')}
             >
-              {loading ? 'Chargement…' : mode === 'login' ? 'Se connecter' : 'Créer le compte'}
+              Connexion
+            </button>
+            <button
+              type="button"
+              className={`auth-mode-chip ${mode === 'register' ? 'is-active' : ''}`}
+              onClick={() => setMode('register')}
+            >
+              Creation
+            </button>
+          </div>
+
+          <div className="auth-copy">
+            <p className="eyebrow">{mode === 'login' ? 'Connexion' : 'Creation de compte'}</p>
+            <h2>{mode === 'login' ? 'Recupere tes runs et ton pipeline.' : 'Active ton cockpit candidat.'}</h2>
+            <p className="panel-note">
+              {mode === 'login'
+                ? 'Reprends tes recherches, veilles et candidatures la ou tu les as laissees.'
+                : 'Le compte sert a garder tes veilles, ton CRM et tes futures variantes CV dans la duree.'}
+            </p>
+          </div>
+
+          <form className="auth-form" onSubmit={handleSubmit}>
+            {mode === 'register' && (
+              <label className="field-stack">
+                <span>Nom affiche</span>
+                <input value={name} onChange={(event) => setName(event.target.value)} placeholder="Prenom Nom" />
+              </label>
+            )}
+
+            <label className="field-stack">
+              <span>Email</span>
+              <input
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                type="email"
+                placeholder="toi@exemple.com"
+              />
+            </label>
+
+            <label className="field-stack">
+              <span>Mot de passe</span>
+              <input
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                type="password"
+                placeholder="Minimum 6 caracteres"
+              />
+            </label>
+
+            {error && <div className="feedback-box danger">{error}</div>}
+
+            <button className="primary-button" type="submit" disabled={loading}>
+              {loading ? 'Chargement...' : mode === 'login' ? 'Entrer dans le cockpit' : 'Creer le compte'}
             </button>
           </form>
 
-          <div className="mt-5 text-center">
-            <button
-              onClick={() => { setMode(mode === 'login' ? 'register' : 'login'); setError('') }}
-              className="text-sm underline"
-              style={{ color: '#9AABB8' }}
-            >
-              {mode === 'login'
-                ? "Pas encore de compte ? S'inscrire"
-                : 'Déjà un compte ? Se connecter'}
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
+          <p className="auth-footer">
+            {mode === 'login'
+              ? "Pas encore de compte ? Passe en creation pour sauvegarder tes futures veilles."
+              : 'Tu as deja un compte ? Reviens en connexion pour reprendre ton espace.'}
+          </p>
+        </section>
+      </section>
+    </main>
   )
 }

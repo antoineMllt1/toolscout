@@ -163,7 +163,7 @@ class WTTJScraper(BaseScraper):
             return resp.json()
         except Exception as e:
             code = resp.status_code if resp else "?"
-            print(f"[wttj] Algolia error (HTTP {code}): {e}")
+            self.log.warning("Algolia error (HTTP %s): %s", code, e)
             return None
 
     def _parse_hit(self, hit: dict, tool: str) -> JobResult | None:

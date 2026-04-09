@@ -1,248 +1,436 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import TagInput from '../components/TagInput'
 import { useApplications } from '../context/ApplicationContext'
+import { useAuth } from '../context/AuthContext'
 
-const STATUSES = [
-  { key: 'saved',     label: 'Sauvegardé',   emoji: '🔖', color: '#6B7B90', bg: '#EEF2F7', border: '#D6DFF0' },
-  { key: 'applied',   label: 'Postulé',       emoji: '📤', color: '#3A5FA8', bg: '#E8F0FC', border: '#B8CCEF' },
-  { key: 'interview', label: 'Entretien',     emoji: '🤝', color: '#8B6A00', bg: '#FEF9E8', border: '#E8D88A' },
-  { key: 'offer',     label: 'Offre reçue',   emoji: '🎉', color: '#2E7D52', bg: '#E8F4EC', border: '#A8D5BC' },
-  { key: 'rejected',  label: 'Refusé',        emoji: '❌', color: '#9B2E2E', bg: '#FDECEA', border: '#F5BCBC' },
+const KANBAN_COLUMNS = [
+  {
+    key: 'saved',
+    label: 'A qualifier',
+    note: 'Cartes a relire',
+    matcher: (app) => app.status === 'saved',
+  },
+  {
+    key: 'applied',
+    label: 'Postule',
+    note: 'Dossiers envoyes',
+    matcher: (app) => app.status === 'applied',
+  },
+  {
+    key: 'interview',
+    label: 'Entretien',
+    note: 'Suivi en cours',
+    matcher: (app) => app.status === 'interview',
+  },
+  {
+    key: 'closed',
+    label: 'Clos',
+    note: 'Offres ou refus',
+    matcher: (app) => ['offer', 'rejected'].includes(app.status),
+  },
 ]
 
-const SOURCE_LABELS = { wttj: 'WTTJ', linkedin: 'LinkedIn', indeed: 'Indeed', jobteaser: 'Jobteaser' }
-
-function StatusBadge({ status }) {
-  const s = STATUSES.find(x => x.key === status) || STATUSES[0]
-  return (
-    <span
-      className="px-2.5 py-0.5 rounded-full text-xs font-medium"
-      style={{ background: s.bg, color: s.color }}
-    >
-      {s.emoji} {s.label}
-    </span>
-  )
+const CADENCE_LABELS = {
+  daily: 'Tous les jours',
+  every_3_days: 'Tous les 3 jours',
+  weekly: 'Chaque semaine',
 }
 
-function ApplicationCard({ app, onStatusChange, onDelete }) {
-  const [open, setOpen] = useState(false)
-  const [notes, setNotes] = useState(app.notes || '')
-  const [saving, setSaving] = useState(false)
-
-  async function handleStatus(newStatus) {
-    setSaving(true)
-    await onStatusChange(app.id, newStatus, notes)
-    setSaving(false)
-  }
-
-  async function handleNotesSave() {
-    setSaving(true)
-    await onStatusChange(app.id, app.status, notes)
-    setSaving(false)
-    setOpen(false)
-  }
+function ApplicationMiniCard({ app, onAdvance, onDelete }) {
+  const nextStatus = app.status === 'saved'
+    ? 'applied'
+    : app.status === 'applied'
+      ? 'interview'
+      : app.status === 'interview'
+        ? 'offer'
+        : null
 
   return (
-    <div
-      className="rounded-2xl border p-4 transition-shadow hover:shadow-md"
-      style={{ background: '#fff', borderColor: '#D6DFF0' }}
-    >
-      <div className="flex items-start justify-between gap-2 mb-2">
-        <div className="flex-1 min-w-0">
-          <p className="text-xs font-semibold uppercase tracking-wider mb-0.5" style={{ color: '#9AABB8' }}>
-            {app.company_name || '—'}
-          </p>
-          <a
-            href={app.job_url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="font-semibold text-sm leading-snug hover:underline"
-            style={{ color: '#2C3E50' }}
-            onClick={e => e.stopPropagation()}
-          >
-            {app.job_title}
-          </a>
-        </div>
-        <button
-          onClick={() => onDelete(app.id)}
-          className="opacity-30 hover:opacity-70 transition-opacity shrink-0"
-        >
-          <svg className="w-4 h-4" style={{ color: '#9B2E2E' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-              d="M6 18L18 6M6 6l12 12" />
-          </svg>
+    <article className="mini-app-card">
+      <div>
+        <p className="eyebrow">{app.source || 'Source'}</p>
+        <h4>{app.job_title}</h4>
+        <p>{app.company_name || 'Entreprise non precisee'}</p>
+      </div>
+
+      <div className="mini-app-meta">
+        {app.location && <span className="inline-badge">{app.location}</span>}
+        {app.contract_type && <span className="inline-badge">{app.contract_type}</span>}
+      </div>
+
+      <div className="mini-app-actions">
+        <a className="text-action" href={app.job_url} target="_blank" rel="noreferrer">
+          Ouvrir
+        </a>
+        {nextStatus && (
+          <button className="text-action" onClick={() => onAdvance(app.id, nextStatus)}>
+            Etape suivante
+          </button>
+        )}
+        <button className="text-action danger" onClick={() => onDelete(app.id)}>
+          Retirer
         </button>
       </div>
-
-      {/* Meta */}
-      <div className="flex flex-wrap gap-1.5 mb-3">
-        {app.location && (
-          <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: '#EEF2F7', color: '#6B7B90' }}>
-            📍 {app.location}
-          </span>
-        )}
-        {app.source && (
-          <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: '#EEF2F7', color: '#6B7B90' }}>
-            {SOURCE_LABELS[app.source] || app.source}
-          </span>
-        )}
-        {app.applied_at && (
-          <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: '#EEF2F7', color: '#6B7B90' }}>
-            📅 {new Date(app.applied_at).toLocaleDateString('fr-FR')}
-          </span>
-        )}
-      </div>
-
-      {/* Status selector */}
-      <div className="flex flex-wrap gap-1 mb-3">
-        {STATUSES.map(s => (
-          <button
-            key={s.key}
-            disabled={saving}
-            onClick={() => handleStatus(s.key)}
-            className="px-2 py-0.5 rounded-full text-xs font-medium border transition-all"
-            style={
-              app.status === s.key
-                ? { background: s.bg, color: s.color, borderColor: s.border }
-                : { background: '#fff', color: '#9AABB8', borderColor: '#D6DFF0' }
-            }
-          >
-            {s.emoji} {s.label}
-          </button>
-        ))}
-      </div>
-
-      {/* Notes toggle */}
-      <button
-        onClick={() => setOpen(!open)}
-        className="text-xs underline transition-colors"
-        style={{ color: '#9AABB8' }}
-      >
-        {open ? 'Fermer les notes' : (app.notes ? '📝 Voir les notes' : '+ Ajouter une note')}
-      </button>
-
-      {open && (
-        <div className="mt-2">
-          <textarea
-            value={notes}
-            onChange={e => setNotes(e.target.value)}
-            rows={3}
-            placeholder="Notes sur cette candidature…"
-            className="w-full rounded-xl border px-3 py-2 text-sm resize-none outline-none focus:ring-2 transition-shadow"
-            style={{ borderColor: '#D6DFF0', color: '#2C3E50' }}
-          />
-          <button
-            onClick={handleNotesSave}
-            disabled={saving}
-            className="mt-1.5 px-4 py-1.5 rounded-xl text-xs font-semibold text-white"
-            style={{ background: 'linear-gradient(135deg, #6B9BC8, #7BBFAA)' }}
-          >
-            {saving ? 'Enregistrement…' : 'Enregistrer'}
-          </button>
-        </div>
-      )}
-    </div>
+    </article>
   )
 }
 
-export default function DashboardPage() {
+function formatLatestRun(watchlist) {
+  if (!watchlist.latest_run) return 'Aucun run encore lance.'
+
+  const matched = watchlist.latest_run.matched_results || 0
+  const total = watchlist.latest_run.total_results || 0
+  return `Dernier run: ${matched} match${matched > 1 ? 's' : ''} cibles sur ${total} annonce${total > 1 ? 's' : ''}.`
+}
+
+export default function DashboardPage({ onNavigate }) {
+  const { user, authFetch } = useAuth()
   const { applications, updateStatus, removeApplication } = useApplications()
-  const [activeStatus, setActiveStatus] = useState('all')
+  const [watchlists, setWatchlists] = useState([])
+  const [templates, setTemplates] = useState([])
+  const [submitting, setSubmitting] = useState(false)
+  const [watchForm, setWatchForm] = useState({
+    name: '',
+    tools: ['Power BI'],
+    roles: ['Data Analyst'],
+    cadence: 'daily',
+    active: true,
+  })
 
-  const stats = STATUSES.reduce((acc, s) => {
-    acc[s.key] = applications.filter(a => a.status === s.key).length
-    return acc
-  }, {})
+  useEffect(() => {
+    if (!user) return
+    void loadWatchlists()
+    void loadTemplates()
+  }, [user])
 
-  const filtered = activeStatus === 'all'
-    ? applications
-    : applications.filter(a => a.status === activeStatus)
+  async function loadWatchlists() {
+    const response = await authFetch('/api/watchlists')
+    if (!response.ok) return
+    setWatchlists(await response.json())
+  }
+
+  async function loadTemplates() {
+    const response = await fetch('/api/cv/templates')
+    if (!response.ok) return
+    setTemplates(await response.json())
+  }
+
+  async function createWatchlist(event) {
+    event.preventDefault()
+    setSubmitting(true)
+    try {
+      const response = await authFetch('/api/watchlists', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(watchForm),
+      })
+      if (!response.ok) return
+      setWatchForm({
+        name: '',
+        tools: [],
+        roles: [],
+        cadence: 'daily',
+        active: true,
+      })
+      await loadWatchlists()
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function toggleWatchlist(watchlist) {
+    await authFetch(`/api/watchlists/${watchlist.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ active: !watchlist.active }),
+    })
+    await loadWatchlists()
+  }
+
+  async function runWatchlistNow(watchlistId) {
+    await authFetch(`/api/watchlists/${watchlistId}/run`, { method: 'POST' })
+    await loadWatchlists()
+  }
+
+  async function deleteWatchlist(watchlistId) {
+    await authFetch(`/api/watchlists/${watchlistId}`, { method: 'DELETE' })
+    await loadWatchlists()
+  }
+
+  const board = useMemo(
+    () =>
+      KANBAN_COLUMNS.map((column) => ({
+        ...column,
+        items: applications.filter(column.matcher),
+      })),
+    [applications],
+  )
+
+  const trackedCount = applications.length
+  const activeWatchlists = watchlists.filter((watchlist) => watchlist.active).length
+  const interviewCount = applications.filter((app) => app.status === 'interview').length
+  const nextReviewCard = applications.find((app) => app.status === 'saved') || applications[0] || null
+
+  if (!user) {
+    return (
+      <main className="dashboard-page">
+        <section className="empty-panel fade-stagger" style={{ '--index': 0 }}>
+          <p className="eyebrow">Compte requis</p>
+          <h3>Connecte-toi pour suivre tes candidatures, lancer des veilles et preparer des CV cibles.</h3>
+          <button className="primary-button" onClick={() => onNavigate('auth')}>
+            Ouvrir la connexion
+          </button>
+        </section>
+      </main>
+    )
+  }
 
   return (
-    <main className="max-w-6xl mx-auto px-4 sm:px-6 py-10">
-      {/* Header */}
-      <div className="mb-8">
-        <h1 className="text-3xl font-bold mb-1" style={{ color: '#2C3E50' }}>Mes candidatures</h1>
-        <p className="text-sm" style={{ color: '#7A90A4' }}>
-          {applications.length} offre{applications.length > 1 ? 's' : ''} suivie{applications.length > 1 ? 's' : ''}
-        </p>
-      </div>
+    <main className="dashboard-page">
+      <section className="dashboard-hero-grid">
+        <article className="hero-slab dark fade-stagger" style={{ '--index': 0 }}>
+          <div className="hero-copy">
+            <p className="eyebrow is-light">Student cockpit</p>
+            <h1 className="dashboard-display">Construis un pipeline de stage qui ne se perd pas en route.</h1>
+            <p className="lede is-light">
+              Recherche, suivi de candidature, veille recurrente et base CV vivent dans le meme cockpit.
+              Le but est de garder un systeme fiable, pas un simple scraper jetable.
+            </p>
+          </div>
 
-      {/* Stats row */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-8">
-        {STATUSES.map(s => (
-          <button
-            key={s.key}
-            onClick={() => setActiveStatus(activeStatus === s.key ? 'all' : s.key)}
-            className="rounded-2xl border p-4 text-left transition-all hover:shadow-md"
-            style={{
-              background: activeStatus === s.key ? s.bg : '#fff',
-              borderColor: activeStatus === s.key ? s.border : '#D6DFF0',
-            }}
-          >
-            <p className="text-2xl mb-1">{s.emoji}</p>
-            <p className="text-2xl font-bold" style={{ color: s.color }}>{stats[s.key] || 0}</p>
-            <p className="text-xs font-medium" style={{ color: '#7A90A4' }}>{s.label}</p>
-          </button>
-        ))}
-      </div>
+          <div className="hero-action-row">
+            <button className="primary-button light" onClick={() => onNavigate('search')}>
+              Revenir aux annonces
+            </button>
+            <button className="secondary-button dark" onClick={() => onNavigate('history')}>
+              Voir les runs
+            </button>
+          </div>
 
-      {/* Filter pills */}
-      <div className="flex gap-2 mb-6 flex-wrap">
-        <button
-          onClick={() => setActiveStatus('all')}
-          className="px-4 py-1.5 rounded-full text-sm font-medium transition-all border"
-          style={
-            activeStatus === 'all'
-              ? { background: '#6B9BC8', color: '#fff', borderColor: '#6B9BC8' }
-              : { background: '#fff', color: '#6B7B90', borderColor: '#D6DFF0' }
-          }
-        >
-          Toutes ({applications.length})
-        </button>
-        {STATUSES.filter(s => stats[s.key] > 0).map(s => (
-          <button
-            key={s.key}
-            onClick={() => setActiveStatus(activeStatus === s.key ? 'all' : s.key)}
-            className="px-4 py-1.5 rounded-full text-sm font-medium transition-all border"
-            style={
-              activeStatus === s.key
-                ? { background: s.bg, color: s.color, borderColor: s.border }
-                : { background: '#fff', color: '#6B7B90', borderColor: '#D6DFF0' }
-            }
-          >
-            {s.emoji} {s.label} ({stats[s.key]})
-          </button>
-        ))}
-      </div>
+          <div className="hero-stat-strip">
+            <div className="hero-stat-chip">
+              <span>Candidatures suivies</span>
+              <strong>{trackedCount}</strong>
+            </div>
+            <div className="hero-stat-chip">
+              <span>Veilles actives</span>
+              <strong>{activeWatchlists}</strong>
+            </div>
+            <div className="hero-stat-chip">
+              <span>Entretiens</span>
+              <strong>{interviewCount}</strong>
+            </div>
+          </div>
+        </article>
 
-      {/* Cards grid */}
-      {filtered.length === 0 ? (
-        <div
-          className="rounded-2xl border p-16 text-center"
-          style={{ background: '#fff', borderColor: '#D6DFF0' }}
-        >
-          <p className="text-5xl mb-4">📋</p>
-          <p className="font-semibold text-lg mb-1" style={{ color: '#2C3E50' }}>
-            {applications.length === 0 ? 'Aucune candidature suivie' : 'Aucune candidature dans ce statut'}
-          </p>
-          <p className="text-sm" style={{ color: '#9AABB8' }}>
-            {applications.length === 0
-              ? 'Sauvegardez des offres depuis la page Recherche pour les retrouver ici.'
-              : 'Changez le filtre ou mettez à jour le statut de vos candidatures.'}
-          </p>
+        <aside className="hero-rail">
+          <article className="rail-panel fade-stagger" style={{ '--index': 1 }}>
+            <p className="eyebrow">Focus du jour</p>
+            <h2>{nextReviewCard?.job_title || 'Aucune carte en attente'}</h2>
+            <p>
+              {nextReviewCard
+                ? `${nextReviewCard.company_name || 'Entreprise non precisee'} - ${nextReviewCard.location || 'Lieu a verifier'}`
+                : 'Lance une recherche puis classe les offres les plus solides ici.'}
+            </p>
+            <button className="text-action" onClick={() => onNavigate('search')}>
+              Ouvrir le workspace
+            </button>
+          </article>
+
+          <div className="dashboard-summary-grid">
+            <article className="summary-card tone-blue fade-stagger" style={{ '--index': 2 }}>
+              <span>Templates CV</span>
+              <strong>{templates.length}</strong>
+            </article>
+            <article className="summary-card tone-green fade-stagger" style={{ '--index': 3 }}>
+              <span>Cartes a relire</span>
+              <strong>{board.find((column) => column.key === 'saved')?.items.length || 0}</strong>
+            </article>
+            <article className="summary-card tone-yellow fade-stagger" style={{ '--index': 4 }}>
+              <span>Runs planifies</span>
+              <strong>{watchlists.length}</strong>
+            </article>
+          </div>
+        </aside>
+      </section>
+
+      <section className="dashboard-grid">
+        <div className="dashboard-main-column">
+          <section className="panel-shell fade-stagger" style={{ '--index': 5 }}>
+            <div className="panel-head">
+              <div>
+                <p className="eyebrow">Pipeline</p>
+                <h2>CRM de candidature</h2>
+              </div>
+              <p className="panel-note">Chaque colonne reste legere pour pouvoir trier vite, puis approfondir au bon moment.</p>
+            </div>
+
+            <div className="kanban-grid">
+              {board.map((column) => (
+                <section key={column.key} className="kanban-column">
+                  <header>
+                    <div>
+                      <h3>{column.label}</h3>
+                      <small>{column.note}</small>
+                    </div>
+                    <small>{column.items.length}</small>
+                  </header>
+
+                  <div className="kanban-stack">
+                    {column.items.length === 0 ? (
+                      <div className="kanban-empty">Aucune carte</div>
+                    ) : (
+                      column.items.map((app) => (
+                        <ApplicationMiniCard
+                          key={app.id}
+                          app={app}
+                          onAdvance={updateStatus}
+                          onDelete={removeApplication}
+                        />
+                      ))
+                    )}
+                  </div>
+                </section>
+              ))}
+            </div>
+          </section>
+
+          <section className="panel-shell fade-stagger" style={{ '--index': 6 }}>
+            <div className="panel-head">
+              <div>
+                <p className="eyebrow">CV studio</p>
+                <h2>Base moderncv</h2>
+              </div>
+              <p className="panel-note">Point de depart pour preparer plusieurs variantes de CV selon le poste vise.</p>
+            </div>
+
+            <div className="template-grid">
+              {templates.map((template) => (
+                <article key={template.slug} className="template-card">
+                  <p className="eyebrow">{template.family}</p>
+                  <h3>{template.name}</h3>
+                  <p>{template.description}</p>
+                  <div className="template-meta">
+                    <span className="inline-badge">{template.style}</span>
+                    <span className="inline-badge">{template.engine}</span>
+                  </div>
+                  <div className="template-actions">
+                    <a className="text-action" href={template.repo_url} target="_blank" rel="noreferrer">
+                      Ouvrir le repo
+                    </a>
+                    <button className="text-action" onClick={() => onNavigate('cv')}>
+                      Ouvrir CV Studio
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
         </div>
-      ) : (
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-          {filtered.map(app => (
-            <ApplicationCard
-              key={app.id}
-              app={app}
-              onStatusChange={updateStatus}
-              onDelete={removeApplication}
-            />
-          ))}
+
+        <div className="dashboard-side-column">
+          <section className="panel-shell fade-stagger" style={{ '--index': 7 }}>
+            <div className="panel-head">
+              <div>
+                <p className="eyebrow">Veille</p>
+                <h2>Planifier une surveillance</h2>
+              </div>
+            </div>
+
+            <form className="watchlist-form" onSubmit={createWatchlist}>
+              <label className="field-stack">
+                <span>Nom de la veille</span>
+                <input
+                  value={watchForm.name}
+                  onChange={(event) => setWatchForm((prev) => ({ ...prev, name: event.target.value }))}
+                  placeholder="Alternance analytics France"
+                />
+              </label>
+
+              <TagInput
+                label="Outils surveilles"
+                placeholder="Ajoute plusieurs outils"
+                value={watchForm.tools}
+                onChange={(tools) => setWatchForm((prev) => ({ ...prev, tools }))}
+              />
+
+              <TagInput
+                label="Roles cibles"
+                placeholder="Data analyst, BI intern, growth ops"
+                value={watchForm.roles}
+                onChange={(roles) => setWatchForm((prev) => ({ ...prev, roles }))}
+              />
+
+              <label className="field-stack">
+                <span>Frequence</span>
+                <select
+                  value={watchForm.cadence}
+                  onChange={(event) => setWatchForm((prev) => ({ ...prev, cadence: event.target.value }))}
+                >
+                  <option value="daily">Tous les jours</option>
+                  <option value="every_3_days">Tous les 3 jours</option>
+                  <option value="weekly">Chaque semaine</option>
+                </select>
+              </label>
+
+              <button className="primary-button" type="submit" disabled={submitting || !watchForm.tools.length}>
+                {submitting ? 'Creation...' : 'Creer la veille'}
+              </button>
+              <p className="panel-note">Le scheduling est pret. Le canal Slack sera branche ensuite.</p>
+            </form>
+          </section>
+
+          <section className="panel-shell fade-stagger" style={{ '--index': 8 }}>
+            <div className="panel-head">
+              <div>
+                <p className="eyebrow">Runs planifies</p>
+                <h2>Veilles existantes</h2>
+              </div>
+            </div>
+
+            <div className="watchlist-stack">
+              {watchlists.length === 0 ? (
+                <div className="kanban-empty">Aucune veille pour le moment.</div>
+              ) : (
+                watchlists.map((watchlist) => (
+                  <article key={watchlist.id} className="watchlist-card">
+                    <div className="watchlist-head">
+                      <div>
+                        <h3>{watchlist.name}</h3>
+                        <p>{watchlist.tools.join(', ')}</p>
+                      </div>
+                      <span className={`inline-badge ${watchlist.active ? 'is-selected' : ''}`}>
+                        {watchlist.active ? 'Active' : 'Pause'}
+                      </span>
+                    </div>
+
+                    <div className="watchlist-meta">
+                      <span className="inline-badge">{CADENCE_LABELS[watchlist.cadence] || watchlist.cadence}</span>
+                      {(watchlist.roles || []).map((role) => (
+                        <span key={role} className="inline-badge">{role}</span>
+                      ))}
+                    </div>
+
+                    <p className="panel-note">{formatLatestRun(watchlist)}</p>
+
+                    <div className="watchlist-actions">
+                      <button className="text-action" onClick={() => runWatchlistNow(watchlist.id)}>
+                        Lancer maintenant
+                      </button>
+                      <button className="text-action" onClick={() => toggleWatchlist(watchlist)}>
+                        {watchlist.active ? 'Mettre en pause' : 'Reactiver'}
+                      </button>
+                      <button className="text-action danger" onClick={() => deleteWatchlist(watchlist.id)}>
+                        Supprimer
+                      </button>
+                    </div>
+                  </article>
+                ))
+              )}
+            </div>
+          </section>
         </div>
-      )}
+      </section>
     </main>
   )
 }

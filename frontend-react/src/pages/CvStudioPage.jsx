@@ -84,6 +84,21 @@ function formatDate(value) {
   }
 }
 
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  anchor.click()
+  URL.revokeObjectURL(url)
+}
+
+function downloadBase64Pdf(base64Value, filename) {
+  const binary = window.atob(base64Value)
+  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0))
+  downloadBlob(new Blob([bytes], { type: 'application/pdf' }), filename)
+}
+
 function createEducation() {
   return {
     id: makeId(),
@@ -558,9 +573,12 @@ export default function CvStudioPage({ onNavigate }) {
   const [sourceMode, setSourceMode] = useState('selected-result')
   const [applicationId, setApplicationId] = useState('')
   const [savingProfile, setSavingProfile] = useState(false)
+  const [uploadingCv, setUploadingCv] = useState(false)
   const [importingPortfolio, setImportingPortfolio] = useState(false)
   const [generatingDraft, setGeneratingDraft] = useState(false)
   const [enhancingDraft, setEnhancingDraft] = useState(false)
+  const [generatingLetter, setGeneratingLetter] = useState(false)
+  const [coverLettersByDraft, setCoverLettersByDraft] = useState({})
   const [feedback, setFeedback] = useState('')
   const [feedbackTone, setFeedbackTone] = useState('info')
 
@@ -621,6 +639,37 @@ export default function CvStudioPage({ onNavigate }) {
       setFeedback(error.message)
     } finally {
       setSavingProfile(false)
+    }
+  }
+
+  async function uploadCvFile(event) {
+    const selectedFile = event.target.files?.[0]
+    if (!selectedFile) return
+
+    setUploadingCv(true)
+    setFeedback('')
+    try {
+      const formData = new FormData()
+      formData.append('file', selectedFile)
+      const response = await authFetch('/api/cv/upload', {
+        method: 'POST',
+        body: formData,
+      })
+      const payload = await response.json()
+      if (!response.ok) {
+        throw new Error(payload.detail || 'Impossible d importer le CV')
+      }
+      setProfile({ ...EMPTY_PROFILE, ...(payload.profile || {}) })
+      setFeedbackTone('info')
+      setFeedback(
+        `CV importe. ${payload.imported?.experience_found || 0} experience(s), ${payload.imported?.education_found || 0} formation(s), ${payload.imported?.projects_found || 0} projet(s).`,
+      )
+    } catch (error) {
+      setFeedbackTone('danger')
+      setFeedback(error.message)
+    } finally {
+      event.target.value = ''
+      setUploadingCv(false)
     }
   }
 
@@ -689,16 +738,24 @@ export default function CvStudioPage({ onNavigate }) {
   }
 
   async function downloadDraft(draft) {
-    const response = await authFetch(`/api/cv/drafts/${draft.id}/tex`)
-    if (!response.ok) return
-    const source = await response.text()
-    const blob = new Blob([source], { type: 'text/x-tex' })
-    const url = URL.createObjectURL(blob)
-    const anchor = document.createElement('a')
-    anchor.href = url
-    anchor.download = `stageai-cv-${draft.id}.tex`
-    anchor.click()
-    URL.revokeObjectURL(url)
+    setFeedback('')
+    try {
+      const copySuggestions = copySuggestionsByDraft[draft.id]
+      const response = await authFetch(`/api/cv/drafts/${draft.id}/pdf`, {
+        method: 'POST',
+        headers: copySuggestions ? { 'Content-Type': 'application/json' } : undefined,
+        body: copySuggestions ? JSON.stringify({ copy_suggestions: copySuggestions }) : undefined,
+      })
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}))
+        throw new Error(payload.detail || 'Impossible de telecharger le PDF')
+      }
+      const blob = await response.blob()
+      downloadBlob(blob, `toolscout-cv-${draft.id}.pdf`)
+    } catch (error) {
+      setFeedbackTone('danger')
+      setFeedback(error.message)
+    }
   }
 
   async function enhanceDraft(draft) {
@@ -721,6 +778,35 @@ export default function CvStudioPage({ onNavigate }) {
     }
   }
 
+  async function generateCoverLetter(draft) {
+    setGeneratingLetter(true)
+    setFeedback('')
+    try {
+      const response = await authFetch('/api/cv/cover-letter/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ draft_id: draft.id }),
+      })
+      const payload = await response.json()
+      if (!response.ok) {
+        throw new Error(payload.detail || 'Impossible de generer la lettre')
+      }
+      setCoverLettersByDraft((prev) => ({ ...prev, [draft.id]: payload }))
+      setFeedbackTone('info')
+      setFeedback('Lettre de motivation generee.')
+    } catch (error) {
+      setFeedbackTone('danger')
+      setFeedback(error.message)
+    } finally {
+      setGeneratingLetter(false)
+    }
+  }
+
+  function downloadCoverLetter(letter) {
+    if (!letter?.pdf_base64) return
+    downloadBase64Pdf(letter.pdf_base64, letter.file_name || 'toolscout-cover-letter.pdf')
+  }
+
   if (!user) {
     return (
       <main className="cv-page">
@@ -738,6 +824,7 @@ export default function CvStudioPage({ onNavigate }) {
   const selectedPayload = selectedDraft?.selected_payload || {}
   const selectedCounts = selectedPayload.match_summary?.selected_counts || {}
   const copySuggestions = selectedDraft ? copySuggestionsByDraft[selectedDraft.id] : null
+  const coverLetter = selectedDraft ? coverLettersByDraft[selectedDraft.id] : null
   const candidateBrief = profile.candidate_brief || EMPTY_PROFILE.candidate_brief
   const studentGuidance = profile.student_guidance || EMPTY_PROFILE.student_guidance
   const interviewPrep = profile.interview_prep || EMPTY_PROFILE.interview_prep
@@ -835,6 +922,16 @@ export default function CvStudioPage({ onNavigate }) {
                     value={profile.portfolio_url}
                     onChange={(event) => setProfile((prev) => ({ ...prev, portfolio_url: event.target.value }))}
                     placeholder="https://ton-portfolio.dev"
+                  />
+                </label>
+
+                <label className="field-stack">
+                  <span>Importer un CV existant</span>
+                  <input
+                    type="file"
+                    accept=".pdf,.docx,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown"
+                    onChange={uploadCvFile}
+                    disabled={uploadingCv}
                   />
                 </label>
 
@@ -1243,11 +1340,19 @@ export default function CvStudioPage({ onNavigate }) {
 
                 <div className="cv-panel-actions">
                   <button className="secondary-button" type="button" onClick={() => downloadDraft(selectedDraft)}>
-                    Telecharger le .tex
+                    Telecharger le PDF
                   </button>
                   <button className="secondary-button" type="button" onClick={() => enhanceDraft(selectedDraft)} disabled={enhancingDraft}>
                     {enhancingDraft ? 'Analyse...' : 'Polir avec l IA'}
                   </button>
+                  <button className="secondary-button" type="button" onClick={() => generateCoverLetter(selectedDraft)} disabled={generatingLetter}>
+                    {generatingLetter ? 'Generation...' : 'Generer la lettre'}
+                  </button>
+                  {coverLetter?.pdf_base64 ? (
+                    <button className="secondary-button" type="button" onClick={() => downloadCoverLetter(coverLetter)}>
+                      Lettre PDF
+                    </button>
+                  ) : null}
                 </div>
 
                 {copySuggestions ? (
@@ -1312,6 +1417,32 @@ export default function CvStudioPage({ onNavigate }) {
                         <span>Notes</span>
                         <ul>
                           {copySuggestions.compliance_notes.map((note) => (
+                            <li key={note}>{note}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {coverLetter ? (
+                  <div className="cv-ai-panel">
+                    <p className="eyebrow">Lettre de motivation</p>
+                    {coverLetter.subject ? (
+                      <div className="cv-ai-block">
+                        <span>Objet</span>
+                        <strong>{coverLetter.subject}</strong>
+                      </div>
+                    ) : null}
+                    <div className="cv-ai-block">
+                      <span>Texte</span>
+                      <textarea rows={14} readOnly value={coverLetter.letter_text} className="cv-code-preview" />
+                    </div>
+                    {coverLetter.compliance_notes?.length ? (
+                      <div className="cv-ai-block">
+                        <span>Notes</span>
+                        <ul>
+                          {coverLetter.compliance_notes.map((note) => (
                             <li key={note}>{note}</li>
                           ))}
                         </ul>

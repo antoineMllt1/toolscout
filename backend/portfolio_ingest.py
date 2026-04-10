@@ -1,4 +1,8 @@
+import json
+import logging
 import re
+import subprocess
+import sys
 import unicodedata
 from datetime import datetime
 from urllib.parse import urljoin, urlparse
@@ -11,6 +15,7 @@ try:
 except ModuleNotFoundError:
     from backend.cv_engine import sanitize_block, sanitize_cv_profile, sanitize_line, sanitize_string_list
 
+logger = logging.getLogger("toolscout.portfolio")
 
 REQUEST_HEADERS = {
     "User-Agent": (
@@ -20,29 +25,6 @@ REQUEST_HEADERS = {
     )
 }
 REQUEST_TIMEOUT_SECONDS = 18
-PROJECT_SECTION_TERMS = (
-    "project",
-    "projects",
-    "work",
-    "selected work",
-    "case study",
-    "case studies",
-    "portfolio",
-    "build",
-    "builds",
-    "realisations",
-    "realisations",
-    "projets",
-)
-ABOUT_SECTION_TERMS = (
-    "about",
-    "profile",
-    "who i am",
-    "a propos",
-    "apropos",
-    "presentation",
-    "bio",
-)
 COMMON_TECH = [
     "Python",
     "SQL",
@@ -400,83 +382,207 @@ def _extract_social_links(soup: BeautifulSoup, base_url: str) -> dict:
     return links
 
 
-def _collect_text_blocks(root: BeautifulSoup, min_length: int = 48, max_items: int = 24) -> list[str]:
+def _render_page_with_playwright(url: str) -> str:
+    """Use Playwright in a subprocess to render JS-heavy pages and return compact structured data."""
+    script = f"""
+import json
+from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    browser = p.chromium.launch(headless=True)
+    page = browser.new_page()
+    try:
+        page.goto("{url}", wait_until="networkidle", timeout=20000)
+    except Exception:
+        page.goto("{url}", wait_until="domcontentloaded", timeout=15000)
+    payload = {{
+        "title": page.title(),
+        "text": page.inner_text("body")[:12000],
+        "headings": page.eval_on_selector_all(
+            "h1, h2, h3",
+            "els => els.map(e => (e.innerText || '').trim()).filter(Boolean).slice(0, 24)"
+        ),
+        "anchors": page.eval_on_selector_all(
+            "a[href]",
+            "els => els.map(e => ({{href: e.href, text: (e.innerText || e.textContent || '').trim().slice(0, 120)}})).filter(item => item.href).slice(0, 80)"
+        ),
+        "cards": page.eval_on_selector_all(
+            "article, section, [class*='project'], [id*='project'], [class*='card']",
+            "els => els.map(e => ({{text: (e.innerText || '').trim().slice(0, 700), href: (e.querySelector('a[href]') || {{}}).href || ''}})).filter(item => item.text && item.text.length > 40).slice(0, 40)"
+        ),
+    }}
+    print(json.dumps(payload))
+    browser.close()
+"""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=35,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception as exc:
+        logger.warning("Playwright render failed for %s: %s", url, exc)
+    return ""
+
+
+def _legacy_extract_portfolio_with_claude_disabled(page_text: str, page_links: list[str], url: str) -> dict:
+    raise PortfolioImportError("Claude portfolio extraction is disabled; use the heuristic scraper path instead")
+
+
+def _extract_social_links_from_anchors(anchor_items: list[dict]) -> dict:
+    links = {"github": "", "linkedin": "", "email": ""}
+    for item in anchor_items or []:
+        href = sanitize_line(item.get("href"), 240)
+        lowered = href.lower()
+        if not links["github"] and "github.com/" in lowered and "/topics/" not in lowered:
+            links["github"] = href
+        elif not links["linkedin"] and "linkedin.com/" in lowered:
+            links["linkedin"] = href
+        elif not links["email"] and lowered.startswith("mailto:"):
+            links["email"] = href.removeprefix("mailto:")
+    return links
+
+
+def _looks_like_person_name(text: str) -> bool:
+    clean = sanitize_line(text, 120)
+    if not clean or re.search(r"\d|@|https?://", clean):
+        return False
+    lowered = clean.lower()
+    if any(token in lowered for token in ["portfolio", "projects", "work", "developer", "engineer", "designer", "analyst"]):
+        return False
+    words = clean.split()
+    return 2 <= len(words) <= 4
+
+
+def _guess_person_name(page_title: str, headings: list[str], page_text: str) -> str:
+    for candidate in headings[:6]:
+        if _looks_like_person_name(candidate):
+            return sanitize_line(candidate, 120)
+    title_bits = re.split(r"[\-|•|:|/]", page_title or "")
+    for candidate in title_bits[:3]:
+        if _looks_like_person_name(candidate):
+            return sanitize_line(candidate, 120)
+    for candidate in page_text.splitlines()[:8]:
+        if _looks_like_person_name(candidate):
+            return sanitize_line(candidate, 120)
+    return ""
+
+
+def _extract_brief_narrative(meta_description: str, page_text: str) -> str:
+    if meta_description:
+        return sanitize_block(meta_description, 600)
+    lines = [sanitize_line(line, 220) for line in page_text.splitlines() if sanitize_line(line, 220)]
+    summary_lines = []
+    for line in lines[:18]:
+        lowered = line.lower()
+        if any(token in lowered for token in ["projects", "experience", "education", "skills", "contact"]):
+            if summary_lines:
+                break
+            continue
+        if len(line) >= 40:
+            summary_lines.append(line)
+        if len(" ".join(summary_lines)) > 380:
+            break
+    return sanitize_block(" ".join(summary_lines), 600)
+
+
+def _build_project_candidate(name: str, summary: str, url: str, source_text: str) -> dict | None:
+    clean_name = sanitize_line(name, 140)
+    if not clean_name:
+        return None
+    lowered = clean_name.lower()
+    if lowered in {"project", "projects", "selected work", "work", "portfolio"}:
+        return None
+    return {
+        "name": clean_name,
+        "role": "",
+        "url": sanitize_line(url, 220),
+        "summary": sanitize_block(summary, 500),
+        "highlights": [],
+        "technologies": _extract_known_skills(source_text, max_items=10),
+        "featured": False,
+    }
+
+
+def _extract_projects_from_cards(cards: list[dict], anchor_items: list[dict]) -> list[dict]:
+    candidates = []
+    for card in cards or []:
+        text = sanitize_block(card.get("text"), 900)
+        if len(text) < 40:
+            continue
+        lines = [sanitize_line(line, 180) for line in text.splitlines() if sanitize_line(line, 180)]
+        if not lines:
+            continue
+        name = ""
+        for line in lines[:4]:
+            if 4 <= len(line) <= 80 and not re.search(r"https?://|www\.|@|\b20\d{2}\b", line):
+                name = line
+                break
+        summary = " ".join(lines[1:4]) if len(lines) > 1 else text
+        candidate = _build_project_candidate(name or lines[0], summary, card.get("href"), text)
+        if candidate and (candidate["technologies"] or len(summary) >= 50):
+            candidates.append(candidate)
+
+    for anchor in anchor_items or []:
+        text = sanitize_line(anchor.get("text"), 120)
+        href = sanitize_line(anchor.get("href"), 220)
+        if not text or len(text) < 4 or len(text) > 90:
+            continue
+        lowered_href = href.lower()
+        if not any(token in lowered_href for token in ["/project", "/projects", "/work", "case-study", "#project"]):
+            continue
+        candidate = _build_project_candidate(text, "", href, text)
+        if candidate:
+            candidates.append(candidate)
+    return _dedupe_projects(candidates, max_items=8)
+
+
+def _extract_section_entries(page_text: str, keywords: list[str], entry_kind: str) -> list[dict]:
+    lines = [sanitize_line(line, 180) for line in page_text.splitlines() if sanitize_line(line, 180)]
+    start_index = None
+    for index, line in enumerate(lines):
+        normalized = _normalize_text(line)
+        if len(line) <= 60 and any(keyword in normalized for keyword in keywords):
+            start_index = index + 1
+            break
+    if start_index is None:
+        return []
+
+    section_lines = []
+    for line in lines[start_index : start_index + 32]:
+        normalized = _normalize_text(line)
+        if len(line) <= 60 and any(
+            token in normalized
+            for token in ["project", "projects", "skills", "competence", "contact", "education", "formation", "experience"]
+        ):
+            break
+        section_lines.append(line)
+
     blocks = []
-    for tag in root.find_all(["p", "li"], limit=240):
-        text = sanitize_block(tag.get_text(" ", strip=True), 320)
-        if len(text) < min_length or text in blocks:
+    current = []
+    for line in section_lines:
+        if current and len(line) <= 80 and (re.search(r"\b20\d{2}\b", line) or len(current) >= 3):
+            blocks.append(current)
+            current = [line]
             continue
-        blocks.append(text)
-        if len(blocks) >= max_items:
-            break
-    return blocks
+        current.append(line)
+    if current:
+        blocks.append(current)
 
-
-def _extract_intro(main: BeautifulSoup, fallback_description: str) -> str:
-    preferred = []
-    for section in main.find_all(["section", "article", "div"], limit=80):
-        heading = section.find(["h1", "h2", "h3"])
-        heading_text = sanitize_line(heading.get_text(" ", strip=True) if heading else "", 120)
-        if heading_text and any(term in _normalize_text(heading_text) for term in ABOUT_SECTION_TERMS):
-            preferred.extend(_collect_text_blocks(section, max_items=3))
-            break
-    if not preferred:
-        preferred = _collect_text_blocks(main, max_items=3)
-    intro = " ".join(preferred[:2]).strip()
-    return intro or fallback_description
-
-
-def _extract_project_candidates(section: BeautifulSoup, base_url: str) -> list[dict]:
-    projects = []
-    cards = section.find_all(["article", "li", "div", "a"], limit=80)
-    for card in cards:
-        title_node = card.find(["h2", "h3", "h4", "strong"])
-        summary_node = card.find("p")
-        link_node = card if card.name == "a" and card.get("href") else card.find("a", href=True)
-        title = sanitize_line(
-            title_node.get_text(" ", strip=True) if title_node else link_node.get_text(" ", strip=True) if link_node else "",
-            140,
-        )
-        summary = sanitize_block(summary_node.get_text(" ", strip=True) if summary_node else "", 340)
-        url = urljoin(base_url, link_node.get("href")) if link_node else ""
-        card_text = sanitize_block(card.get_text(" ", strip=True), 700)
-        if not title or len(title.split()) > 8:
+    entries = []
+    for block in blocks[:6]:
+        if not block:
             continue
-        if len(summary) < 24 and not url:
-            continue
-        if _normalize_text(title) in {"contact", "about", "experience", "skills"}:
-            continue
-        projects.append(
-            {
-                "name": title,
-                "role": "",
-                "url": url,
-                "summary": summary or card_text[:260],
-                "highlights": [],
-                "technologies": _extract_known_skills(card_text, max_items=8),
-                "featured": False,
-            }
-        )
-    return projects
-
-
-def _extract_projects(soup: BeautifulSoup, base_url: str) -> list[dict]:
-    main = soup.find("main") or soup.body or soup
-    projects = []
-    sections = []
-    for section in main.find_all(["section", "article", "div"], limit=120):
-        heading = section.find(["h1", "h2", "h3"])
-        heading_text = sanitize_line(heading.get_text(" ", strip=True) if heading else "", 120)
-        if heading_text and any(term in _normalize_text(heading_text) for term in PROJECT_SECTION_TERMS):
-            sections.append(section)
-
-    for section in sections[:6]:
-        projects.extend(_extract_project_candidates(section, base_url))
-
-    if not projects:
-        projects.extend(_extract_project_candidates(main, base_url))
-
-    return _dedupe_projects(projects)
+        title = sanitize_line(block[0], 140)
+        summary = sanitize_block(" ".join(block[1:4]), 400)
+        if entry_kind == "education":
+            entries.append({"school": title, "degree": "", "field": "", "summary": summary})
+        else:
+            entries.append({"title": title, "company": "", "summary": summary})
+    return entries
 
 
 def _github_username_from_url(url: str) -> str:
@@ -487,10 +593,151 @@ def _github_username_from_url(url: str) -> str:
     return parts[0] if parts else ""
 
 
+def _github_repo_from_url(url: str) -> tuple[str, str]:
+    """Return (owner, repo) if the URL points to a specific GitHub repo."""
+    parsed = urlparse(url or "")
+    if "github.com" not in parsed.netloc:
+        return "", ""
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) >= 2:
+        return parts[0], parts[1]
+    return "", ""
+
+
+def _fetch_github_repo_portfolio(owner: str, repo: str) -> dict:
+    """Extract portfolio data from a specific GitHub repo (README + repo metadata)."""
+    gh_headers = {"Accept": "application/vnd.github+json", **REQUEST_HEADERS}
+
+    # Fetch repo metadata
+    repo_resp = requests.get(
+        f"https://api.github.com/repos/{owner}/{repo}",
+        headers=gh_headers, timeout=REQUEST_TIMEOUT_SECONDS,
+    )
+    if not repo_resp.ok:
+        raise PortfolioImportError(f"GitHub repo {owner}/{repo} not found")
+    repo_data = repo_resp.json()
+
+    # Fetch README content
+    readme_text = ""
+    try:
+        readme_resp = requests.get(
+            f"https://api.github.com/repos/{owner}/{repo}/readme",
+            headers={**gh_headers, "Accept": "application/vnd.github.raw+json"},
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+        if readme_resp.ok:
+            readme_text = readme_resp.text[:10000]
+    except Exception:
+        pass
+
+    # Fetch user profile for name/bio
+    user_resp = requests.get(
+        f"https://api.github.com/users/{owner}",
+        headers=gh_headers, timeout=REQUEST_TIMEOUT_SECONDS,
+    )
+    user = user_resp.json() if user_resp.ok else {}
+
+    # Fetch languages used in the repo
+    languages = []
+    try:
+        lang_resp = requests.get(
+            f"https://api.github.com/repos/{owner}/{repo}/languages",
+            headers=gh_headers, timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+        if lang_resp.ok:
+            languages = list(lang_resp.json().keys())[:12]
+    except Exception:
+        pass
+    if not languages and repo_data.get("language"):
+        languages = [repo_data["language"]]
+
+    # Also fetch other repos from this user for a complete profile
+    other_projects = []
+    try:
+        repos_resp = requests.get(
+            f"https://api.github.com/users/{owner}/repos?per_page=30&type=owner&sort=updated",
+            headers=gh_headers, timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+        if repos_resp.ok:
+            for r in repos_resp.json():
+                if r.get("fork") or r.get("name") == repo:
+                    continue
+                techs = [r["language"]] if r.get("language") else []
+                other_projects.append({
+                    "name": r.get("name", "").replace("-", " ").strip() or "GitHub project",
+                    "role": "Repository owner",
+                    "url": r.get("homepage") or r.get("html_url") or "",
+                    "summary": r.get("description") or "GitHub repository",
+                    "highlights": [
+                        detail for detail in [
+                            f"{r.get('stargazers_count', 0)} stars" if r.get("stargazers_count") else "",
+                            "Has live demo" if r.get("homepage") else "",
+                        ] if detail
+                    ],
+                    "technologies": techs,
+                    "featured": False,
+                })
+    except Exception:
+        pass
+
+    # Parse README for skills and structure
+    all_skills = sanitize_string_list(
+        [*languages, *_extract_known_skills(readme_text, max_items=20)],
+        max_items=24, max_length=80,
+    )
+
+    # Main project from the repo itself
+    main_project = {
+        "name": repo_data.get("name", "").replace("-", " ").strip() or "Portfolio repo",
+        "role": "Repository owner",
+        "url": repo_data.get("homepage") or repo_data.get("html_url") or "",
+        "summary": repo_data.get("description") or "GitHub portfolio repository",
+        "highlights": [
+            detail for detail in [
+                f"{repo_data.get('stargazers_count', 0)} stars" if repo_data.get("stargazers_count") else "",
+                "Has live demo" if repo_data.get("homepage") else "",
+            ] if detail
+        ],
+        "technologies": languages[:8],
+        "featured": True,
+    }
+
+    projects = _dedupe_projects([main_project, *other_projects])
+    narrative = sanitize_block(repo_data.get("description") or user.get("bio") or "", 600)
+    if readme_text and len(narrative) < 100:
+        # Take first paragraph of README as narrative
+        for line in readme_text.split("\n"):
+            clean = line.strip().lstrip("#").strip()
+            if len(clean) > 40 and not clean.startswith(("!", "[", "|", "```", "---")):
+                narrative = sanitize_block(clean, 600)
+                break
+
+    return {
+        "source_url": repo_data.get("html_url") or f"https://github.com/{owner}/{repo}",
+        "final_url": repo_data.get("html_url") or f"https://github.com/{owner}/{repo}",
+        "domain": "github.com",
+        "page_title": sanitize_line(user.get("name") or owner, 140),
+        "person_name": sanitize_line(user.get("name"), 120),
+        "meta_description": sanitize_block(user.get("bio"), 240),
+        "narrative": narrative,
+        "skills": all_skills,
+        "projects": projects,
+        "links": {
+            "github": user.get("html_url") or f"https://github.com/{owner}",
+            "linkedin": "",
+            "email": sanitize_line(user.get("email"), 120),
+        },
+        "headings": [],
+        "captured_at": datetime.utcnow().isoformat(),
+    }
+
+
 def _fetch_github_profile(username: str) -> dict:
+    gh_headers = {"Accept": "application/vnd.github+json", **REQUEST_HEADERS}
+
     user_resp = requests.get(
         f"https://api.github.com/users/{username}",
-        headers={"Accept": "application/vnd.github+json", **REQUEST_HEADERS},
+        headers=gh_headers,
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
     if not user_resp.ok:
@@ -498,7 +745,7 @@ def _fetch_github_profile(username: str) -> dict:
 
     repos_resp = requests.get(
         f"https://api.github.com/users/{username}/repos?per_page=100&type=owner&sort=updated",
-        headers={"Accept": "application/vnd.github+json", **REQUEST_HEADERS},
+        headers=gh_headers,
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
     if not repos_resp.ok:
@@ -554,66 +801,121 @@ def _fetch_github_profile(username: str) -> dict:
 
 def scrape_portfolio(portfolio_url: str) -> dict:
     normalized_url = _normalize_url(portfolio_url)
+
+    # GitHub repo URL (e.g., github.com/user/repo) → use API directly, no Claude needed
+    owner, repo = _github_repo_from_url(normalized_url)
+    if owner and repo:
+        return _fetch_github_repo_portfolio(owner, repo)
+
+    # GitHub profile URL (e.g., github.com/user) → use API directly
     username = _github_username_from_url(normalized_url)
     if username and urlparse(normalized_url).path.strip("/").count("/") == 0:
         return _fetch_github_profile(username)
 
-    response = requests.get(normalized_url, headers=REQUEST_HEADERS, timeout=REQUEST_TIMEOUT_SECONDS)
-    if not response.ok:
-        raise PortfolioImportError(f"Portfolio URL returned {response.status_code}")
-
-    soup = BeautifulSoup(response.text, "lxml")
-    for tag_name in ["script", "style", "noscript", "svg", "nav", "footer", "form", "iframe"]:
-        for node in soup.find_all(tag_name):
-            node.decompose()
-
-    final_url = response.url
-    main = soup.find("main") or soup.body or soup
-    title = _meta_content(soup, "property", "og:title") or sanitize_line(soup.title.get_text(" ", strip=True) if soup.title else "", 160)
-    description = (
-        _meta_content(soup, "name", "description")
-        or _meta_content(soup, "property", "og:description")
-        or ""
-    )
-    headings = []
-    for heading in main.find_all(["h1", "h2", "h3"], limit=18):
-        text = sanitize_line(heading.get_text(" ", strip=True), 120)
-        if text and text not in headings:
-            headings.append(text)
-
-    social_links = _extract_social_links(soup, final_url)
-    projects = _extract_projects(soup, final_url)
-    if social_links.get("github") and len(projects) < 2:
+    # ── Step 1: Try Playwright render for JS-heavy sites (SPAs, React, etc.) ──
+    rendered_data = _render_page_with_playwright(normalized_url)
+    page_text = ""
+    page_title = ""
+    page_headings = []
+    anchor_items = []
+    page_cards = []
+    if rendered_data:
         try:
-            github_snapshot = _fetch_github_profile(_github_username_from_url(social_links["github"]))
-            projects = _dedupe_projects([*projects, *(github_snapshot.get("projects") or [])])
+            parsed = json.loads(rendered_data)
+            page_text = parsed.get("text", "")
+            page_title = sanitize_line(parsed.get("title"), 180)
+            page_headings = sanitize_string_list(parsed.get("headings"), max_items=24, max_length=120)
+            anchor_items = parsed.get("anchors", [])[:80]
+            page_cards = parsed.get("cards", [])[:40]
+        except Exception:
+            page_text = rendered_data
+
+    final_url = normalized_url
+    meta_description = ""
+    links = {}
+    if not page_text or len(page_text.strip()) < 100:
+        try:
+            response = requests.get(normalized_url, headers=REQUEST_HEADERS, timeout=REQUEST_TIMEOUT_SECONDS)
+            if response.ok:
+                final_url = response.url
+                soup = BeautifulSoup(response.text, "lxml")
+                for tag_name in ["script", "style", "noscript", "svg"]:
+                    for node in soup.find_all(tag_name):
+                        node.decompose()
+                main = soup.find("main") or soup.body or soup
+                page_text = sanitize_block(main.get_text(" ", strip=True), 10000)
+                page_title = page_title or sanitize_line((soup.title.string if soup.title and soup.title.string else ""), 180)
+                meta_description = _meta_content(soup, "name", "description") or _meta_content(soup, "property", "og:description")
+                page_headings = page_headings or sanitize_string_list(
+                    [node.get_text(" ", strip=True) for node in soup.find_all(["h1", "h2", "h3"])],
+                    max_items=24,
+                    max_length=120,
+                )
+                anchor_items = anchor_items or [
+                    {
+                        "href": urljoin(final_url, anchor.get("href", "")),
+                        "text": sanitize_line(anchor.get_text(" ", strip=True), 120),
+                    }
+                    for anchor in soup.find_all("a", href=True)[:80]
+                ]
+                page_cards = page_cards or [
+                    {
+                        "text": sanitize_block(node.get_text("\n", strip=True), 700),
+                        "href": urljoin(final_url, first_anchor.get("href", "")) if (first_anchor := node.find("a", href=True)) else "",
+                    }
+                    for node in soup.find_all(["article", "section"])[:40]
+                    if sanitize_block(node.get_text("\n", strip=True), 700)
+                ]
+                links = _extract_social_links(soup, final_url)
+        except Exception as exc:
+            if not page_text:
+                raise PortfolioImportError(f"Could not fetch portfolio: {exc}")
+
+    if not page_text or len(page_text.strip()) < 50:
+        raise PortfolioImportError("Portfolio page returned no readable content")
+
+    links = {**_extract_social_links_from_anchors(anchor_items), **links}
+    projects = _extract_projects_from_cards(page_cards, anchor_items)
+
+    # If GitHub link found and few projects, enrich from GitHub API
+    if links.get("github") and len(projects) < 3:
+        try:
+            gh_username = _github_username_from_url(links["github"])
+            if gh_username:
+                github_snapshot = _fetch_github_profile(gh_username)
+                projects = _dedupe_projects([*projects, *(github_snapshot.get("projects") or [])])
         except Exception:
             pass
 
-    page_text = sanitize_block(main.get_text(" ", strip=True), 5000)
-    intro = _extract_intro(main, description)
-    person_name = headings[0] if headings and len(headings[0].split()) <= 5 else ""
     skills = sanitize_string_list(
         [
-            *_extract_known_skills(page_text, max_items=20),
+            *_extract_known_skills(page_text, max_items=18),
             *[tech for project in projects for tech in project.get("technologies", [])],
         ],
-        max_items=18,
+        max_items=24,
         max_length=80,
     )
+
+    person_name = _guess_person_name(page_title, page_headings, page_text)
+    narrative = _extract_brief_narrative(meta_description, page_text)
+    domain = urlparse(final_url).netloc.replace("www.", "")
+    experience = _extract_section_entries(page_text, ["experience", "work", "internship", "stage", "alternance"], "experience")
+    education = _extract_section_entries(page_text, ["education", "formation", "school", "university"], "education")
 
     return {
         "source_url": normalized_url,
         "final_url": final_url,
-        "domain": urlparse(final_url).netloc.replace("www.", ""),
-        "page_title": title or person_name or urlparse(final_url).netloc,
-        "person_name": sanitize_line(person_name, 120),
-        "meta_description": description,
-        "narrative": sanitize_block(intro or description, 800),
+        "domain": domain,
+        "page_title": page_title or person_name or domain,
+        "person_name": person_name,
+        "meta_description": meta_description or (narrative[:240] if narrative else ""),
+        "narrative": narrative,
         "skills": skills,
         "projects": projects,
-        "links": social_links,
-        "headings": headings[:10],
+        "links": links,
+        "headings": page_headings,
+        "experience": experience,
+        "education": education,
         "captured_at": datetime.utcnow().isoformat(),
     }
 
@@ -628,6 +930,8 @@ def merge_portfolio_into_profile(profile: dict, snapshot: dict) -> dict:
         merged["github"] = links["github"]
     if not merged.get("linkedin") and links.get("linkedin"):
         merged["linkedin"] = links["linkedin"]
+    if not merged.get("email") and links.get("email"):
+        merged["email"] = links["email"]
     if not merged.get("full_name") and snapshot.get("person_name"):
         merged["full_name"] = snapshot["person_name"]
     if not merged.get("summary") and snapshot.get("narrative"):
@@ -655,6 +959,46 @@ def merge_portfolio_into_profile(profile: dict, snapshot: dict) -> dict:
             }
         )
     merged["projects"] = _dedupe_projects(merged_projects, max_items=20)
+
+    # Merge experience from portfolio if user has none
+    if not merged.get("experience") and snapshot.get("experience"):
+        merged["experience"] = [
+            {
+                "id": f"portfolio-{i}",
+                "company": sanitize_line(exp.get("company"), 120),
+                "title": sanitize_line(exp.get("title"), 140),
+                "location": sanitize_line(exp.get("location"), 120),
+                "start_date": sanitize_line(exp.get("start_date"), 40),
+                "end_date": sanitize_line(exp.get("end_date"), 40),
+                "summary": sanitize_block(exp.get("summary"), 800),
+                "highlights": [],
+                "skills": [],
+                "featured": False,
+            }
+            for i, exp in enumerate(snapshot["experience"][:10])
+            if exp.get("title") or exp.get("company")
+        ]
+
+    # Merge education from portfolio if user has none
+    if not merged.get("education") and snapshot.get("education"):
+        merged["education"] = [
+            {
+                "id": f"portfolio-edu-{i}",
+                "school": sanitize_line(edu.get("school"), 120),
+                "degree": sanitize_line(edu.get("degree"), 120),
+                "field": sanitize_line(edu.get("field"), 120),
+                "location": "",
+                "start_date": "",
+                "end_date": "",
+                "summary": "",
+                "highlights": [],
+                "skills": [],
+                "featured": False,
+            }
+            for i, edu in enumerate(snapshot["education"][:6])
+            if edu.get("school") or edu.get("degree")
+        ]
+
     return sanitize_cv_profile(merged)
 
 

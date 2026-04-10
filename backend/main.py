@@ -1,9 +1,11 @@
 import asyncio
+import base64
 import json
 import os
 import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+from io import BytesIO
 from time import perf_counter
 from typing import AsyncIterator, Optional
 
@@ -14,7 +16,7 @@ if sys.platform == "win32":
 
 import aiosqlite
 import requests
-from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
@@ -27,17 +29,28 @@ load_dotenv()
 
 from database import init_db, get_db, DB_PATH
 from models import SearchCreate
-from anthropic_client import AnthropicConfigError, AnthropicResponseError, generate_cv_copy
+from anthropic_client import (
+    AnthropicConfigError,
+    AnthropicResponseError,
+    extract_cv_profile_from_text,
+    generate_cover_letter,
+    generate_cv_copy,
+)
 from auth import hash_password, verify_password, create_token, decode_token
 from cookie_manager import load_cookies_from_db, cookie_refresh_loop
 from cv_engine import (
     CV_TEMPLATE_LIBRARY,
+    STRICT_COPY_RULES,
     build_target_snapshot,
     build_targeted_cv_draft,
     default_cv_profile,
     dumps_json,
     sanitize_cv_profile,
+    sanitize_line,
+    sanitize_string_list,
 )
+from cv_pdf import generate_pdf_from_html, render_cover_letter_html, render_cv_html
+from cv_upload import extract_text_from_upload, preparse_cv_text
 from normalization import build_normalized_result, match_role_targets
 from career_ops_fit import (
     build_company_research,
@@ -188,6 +201,17 @@ class CvDraftBody(BaseModel):
 
 class PortfolioImportBody(BaseModel):
     portfolio_url: str
+
+
+class CvPdfBody(BaseModel):
+    copy_suggestions: Optional[dict] = None
+
+
+class CoverLetterBody(BaseModel):
+    draft_id: Optional[int] = None
+    application_id: Optional[int] = None
+    result_id: Optional[int] = None
+    template_slug: str = "moderncv-classic"
 
 
 class StoryBankBody(BaseModel):
@@ -634,6 +658,144 @@ def _parse_cv_draft_row(row: dict) -> dict:
     }
 
 
+def _entry_signature(entry: dict, fields: list[str]) -> str:
+    values = [sanitize_line(entry.get(field), 120).lower() for field in fields if entry.get(field)]
+    return "|".join(value for value in values if value)
+
+
+def _merge_unique_entries(existing: list[dict], imported: list[dict], fields: list[str], limit: int) -> list[dict]:
+    merged = []
+    seen = set()
+    for item in [*(existing or []), *(imported or [])]:
+        if not isinstance(item, dict):
+            continue
+        signature = _entry_signature(item, fields)
+        if not signature:
+            continue
+        if signature in seen:
+            continue
+        seen.add(signature)
+        merged.append(item)
+        if len(merged) >= limit:
+            break
+    return merged
+
+
+def _merge_uploaded_cv_profile(profile: dict, extracted: dict, raw_text: str) -> dict:
+    merged = dict(profile)
+    for key in ["full_name", "headline", "email", "phone", "location", "website", "linkedin", "github", "summary"]:
+        if not merged.get(key) and extracted.get(key):
+            merged[key] = extracted[key]
+
+    cleaned_cv_text = raw_text.strip()
+    if cleaned_cv_text:
+        merged["cv_text"] = cleaned_cv_text
+
+    merged["target_roles"] = sanitize_string_list(
+        [*(profile.get("target_roles") or []), *(extracted.get("target_roles") or [])],
+        max_items=10,
+        max_length=80,
+    )
+    merged["skills"] = sanitize_string_list(
+        [*(profile.get("skills") or []), *(extracted.get("skills") or [])],
+        max_items=40,
+        max_length=80,
+    )
+    merged["languages"] = sanitize_string_list(
+        [*(profile.get("languages") or []), *(extracted.get("languages") or [])],
+        max_items=16,
+        max_length=80,
+    )
+    merged["certifications"] = sanitize_string_list(
+        [*(profile.get("certifications") or []), *(extracted.get("certifications") or [])],
+        max_items=20,
+        max_length=120,
+    )
+    merged["experience"] = _merge_unique_entries(
+        profile.get("experience") or [],
+        extracted.get("experience") or [],
+        ["company", "title", "start_date", "end_date"],
+        limit=20,
+    )
+    merged["projects"] = _merge_unique_entries(
+        profile.get("projects") or [],
+        extracted.get("projects") or [],
+        ["name", "role", "url"],
+        limit=20,
+    )
+    merged["education"] = _merge_unique_entries(
+        profile.get("education") or [],
+        extracted.get("education") or [],
+        ["school", "degree", "field", "start_date", "end_date"],
+        limit=12,
+    )
+    return sanitize_cv_profile(merged)
+
+
+def _clean_cv_copy_suggestions(suggestions: dict, selected: dict) -> dict:
+    allowed_experience_ids = {item.get("id") for item in selected.get("experience", [])}
+    allowed_project_ids = {item.get("id") for item in selected.get("projects", [])}
+    allowed_education_ids = {item.get("id") for item in selected.get("education", [])}
+    allowed_skills = set(selected.get("skills", []))
+
+    cleaned = {
+        "headline": str(suggestions.get("headline", "")).strip()[:160],
+        "summary": str(suggestions.get("summary", "")).strip()[:1200],
+        "skills_priority": [
+            skill
+            for skill in suggestions.get("skills_priority", [])
+            if isinstance(skill, str) and skill in allowed_skills
+        ][:10],
+        "experience_rewrites": [],
+        "project_rewrites": [],
+        "education_rewrites": [],
+        "compliance_notes": [
+            note.strip()[:220]
+            for note in suggestions.get("compliance_notes", [])
+            if isinstance(note, str) and note.strip()
+        ][:8],
+    }
+
+    for item in suggestions.get("experience_rewrites", []):
+        if not isinstance(item, dict) or item.get("id") not in allowed_experience_ids:
+            continue
+        bullets = [str(bullet).strip()[:220] for bullet in item.get("bullets", []) if str(bullet).strip()]
+        cleaned["experience_rewrites"].append({"id": item["id"], "bullets": bullets[:4]})
+
+    for item in suggestions.get("project_rewrites", []):
+        if not isinstance(item, dict) or item.get("id") not in allowed_project_ids:
+            continue
+        bullets = [str(bullet).strip()[:220] for bullet in item.get("bullets", []) if str(bullet).strip()]
+        cleaned["project_rewrites"].append({"id": item["id"], "bullets": bullets[:4]})
+
+    for item in suggestions.get("education_rewrites", []):
+        if not isinstance(item, dict) or item.get("id") not in allowed_education_ids:
+            continue
+        bullet = str(item.get("bullet", "")).strip()[:220]
+        if bullet:
+            cleaned["education_rewrites"].append({"id": item["id"], "bullet": bullet})
+
+    return cleaned
+
+
+def _build_cover_letter_prompt_payload(profile: dict, draft_payload: dict) -> dict:
+    prompt_payload = dict(draft_payload.get("prompt_payload") or {})
+    prompt_payload["strict_rules"] = list(prompt_payload.get("strict_rules") or STRICT_COPY_RULES)
+    prompt_payload["candidate_basics"] = {
+        "full_name": profile.get("full_name", ""),
+        "headline": profile.get("headline", ""),
+        "summary": profile.get("summary", ""),
+        "location": profile.get("location", ""),
+    }
+    prompt_payload["instructions"] = [
+        *(prompt_payload.get("instructions") or []),
+        "Write a concise cover letter in French.",
+        "Keep the letter factual, motivated, and specific to the target role.",
+        "Do not introduce any experience or outcome that is absent from allowed_facts.",
+    ]
+    return prompt_payload
+
+
 def _parse_story_bank_row(row: dict) -> dict:
     return {
         "id": row["id"],
@@ -1057,6 +1219,61 @@ async def save_cv_profile(body: CvProfileBody, current_user=Depends(get_current_
     return _parse_cv_profile_row(dict(row), user)
 
 
+@app.post("/api/cv/upload")
+async def upload_cv_file(file: UploadFile = File(...), current_user=Depends(get_current_user)):
+    existing_row, user = await _fetch_cv_profile(current_user["id"])
+    current_profile = _parse_cv_profile_row(existing_row, user)
+
+    try:
+        content = await file.read()
+        document_text = extract_text_from_upload(file.filename or "", file.content_type or "", content)
+        preparsed = preparse_cv_text(document_text)
+        extracted = extract_cv_profile_from_text(
+            {
+                "source_file_name": file.filename or "",
+                "source_content_type": file.content_type or "",
+                "preparsed_resume": preparsed,
+                "document_excerpt": preparsed.get("top_excerpt", ""),
+                "raw_sections": preparsed.get("raw_sections", {}),
+                "current_profile_hints": {
+                    "full_name": current_profile.get("full_name", ""),
+                    "email": current_profile.get("email", ""),
+                    "headline": current_profile.get("headline", ""),
+                },
+            }
+        )
+    except ValueError as error:
+        raise HTTPException(400, str(error))
+    except RuntimeError as error:
+        raise HTTPException(500, str(error))
+    except AnthropicConfigError as error:
+        raise HTTPException(400, str(error))
+    except AnthropicResponseError as error:
+        raise HTTPException(502, str(error))
+
+    preparsed_profile = {key: value for key, value in preparsed.items() if key not in {"raw_sections", "top_excerpt", "notes"}}
+    combined_extracted = _merge_uploaded_cv_profile(preparsed_profile, extracted, document_text)
+    merged_profile = _merge_uploaded_cv_profile(current_profile, combined_extracted, document_text)
+    row = await _upsert_cv_profile(
+        current_user["id"],
+        user,
+        merged_profile,
+        existing_row=existing_row,
+    )
+    profile = _parse_cv_profile_row(dict(row), user)
+    return {
+        "profile": profile,
+        "imported": {
+            "file_name": file.filename or "resume",
+            "skills_found": len(combined_extracted.get("skills") or []),
+            "experience_found": len(combined_extracted.get("experience") or []),
+            "education_found": len(combined_extracted.get("education") or []),
+            "projects_found": len(combined_extracted.get("projects") or []),
+        },
+        "notes": [*(preparsed.get("notes") or []), *(extracted.get("notes") or [])][:8],
+    }
+
+
 @app.post("/api/cv/portfolio/import")
 async def import_cv_portfolio(body: PortfolioImportBody, current_user=Depends(get_current_user)):
     existing_row, user = await _fetch_cv_profile(current_user["id"])
@@ -1135,53 +1352,47 @@ async def copywrite_cv_draft(draft_id: int, current_user=Depends(get_current_use
     except AnthropicResponseError as error:
         raise HTTPException(502, str(error))
 
-    selected = draft["selected_payload"]
-    allowed_experience_ids = {item.get("id") for item in selected.get("experience", [])}
-    allowed_project_ids = {item.get("id") for item in selected.get("projects", [])}
-    allowed_education_ids = {item.get("id") for item in selected.get("education", [])}
-    allowed_skills = set(selected.get("skills", []))
-
-    cleaned = {
-        "headline": str(suggestions.get("headline", "")).strip()[:160],
-        "summary": str(suggestions.get("summary", "")).strip()[:1200],
-        "skills_priority": [
-            skill for skill in suggestions.get("skills_priority", [])
-            if isinstance(skill, str) and skill in allowed_skills
-        ][:10],
-        "experience_rewrites": [],
-        "project_rewrites": [],
-        "education_rewrites": [],
-        "compliance_notes": [
-            note.strip()[:220]
-            for note in suggestions.get("compliance_notes", [])
-            if isinstance(note, str) and note.strip()
-        ][:8],
-    }
-
-    for item in suggestions.get("experience_rewrites", []):
-        if not isinstance(item, dict) or item.get("id") not in allowed_experience_ids:
-            continue
-        bullets = [str(bullet).strip()[:220] for bullet in item.get("bullets", []) if str(bullet).strip()]
-        cleaned["experience_rewrites"].append({"id": item["id"], "bullets": bullets[:4]})
-
-    for item in suggestions.get("project_rewrites", []):
-        if not isinstance(item, dict) or item.get("id") not in allowed_project_ids:
-            continue
-        bullets = [str(bullet).strip()[:220] for bullet in item.get("bullets", []) if str(bullet).strip()]
-        cleaned["project_rewrites"].append({"id": item["id"], "bullets": bullets[:4]})
-
-    for item in suggestions.get("education_rewrites", []):
-        if not isinstance(item, dict) or item.get("id") not in allowed_education_ids:
-            continue
-        bullet = str(item.get("bullet", "")).strip()[:220]
-        if bullet:
-            cleaned["education_rewrites"].append({"id": item["id"], "bullet": bullet})
+    cleaned = _clean_cv_copy_suggestions(suggestions, draft["selected_payload"])
 
     return {
         "draft_id": draft_id,
-        "model": os.environ.get("ANTHROPIC_MODEL", "claude-3-5-haiku-latest"),
+        "model": os.environ.get("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022"),
         "suggestions": cleaned,
     }
+
+
+@app.post("/api/cv/drafts/{draft_id}/pdf")
+async def download_cv_draft_pdf(
+    draft_id: int,
+    body: Optional[CvPdfBody] = None,
+    current_user=Depends(get_current_user),
+):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM cv_drafts WHERE id = ? AND user_id = ?",
+            (draft_id, current_user["id"]),
+        )
+        row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "CV draft not found")
+
+    profile_row, user = await _fetch_cv_profile(current_user["id"])
+    profile = _parse_cv_profile_row(profile_row, user)
+    draft = _parse_cv_draft_row(dict(row))
+    copy_suggestions = None
+    if body and body.copy_suggestions:
+        copy_suggestions = _clean_cv_copy_suggestions(body.copy_suggestions, draft["selected_payload"])
+
+    try:
+        html = render_cv_html(profile, draft["template_slug"], draft["selected_payload"], copy_suggestions)
+        pdf_bytes = generate_pdf_from_html(html)
+    except RuntimeError as error:
+        raise HTTPException(500, str(error))
+
+    filename = f"toolscout-cv-{draft_id}.pdf"
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    return StreamingResponse(BytesIO(pdf_bytes), media_type="application/pdf", headers=headers)
 
 
 @app.get("/api/cv/drafts/{draft_id}/tex")
@@ -1199,6 +1410,89 @@ async def download_cv_draft_tex(draft_id: int, current_user=Depends(get_current_
     filename = f"toolscout-cv-{draft_id}.tex"
     headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
     return PlainTextResponse(draft["latex_source"], headers=headers)
+
+
+@app.post("/api/cv/cover-letter/generate")
+async def generate_cv_cover_letter(body: CoverLetterBody, current_user=Depends(get_current_user)):
+    profile_row, user = await _fetch_cv_profile(current_user["id"])
+    profile = _parse_cv_profile_row(profile_row, user)
+    has_profile_data = any(
+        [
+            profile["summary"],
+            profile["skills"],
+            profile["experience"],
+            profile["projects"],
+            profile["education"],
+            profile["cv_text"],
+        ]
+    )
+    if not has_profile_data:
+        raise HTTPException(400, "Complete your CV profile before generating a cover letter")
+
+    if body.draft_id is not None:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT * FROM cv_drafts WHERE id = ? AND user_id = ?",
+                (body.draft_id, current_user["id"]),
+            )
+            row = await cur.fetchone()
+        if not row:
+            raise HTTPException(404, "CV draft not found")
+        draft_payload = _parse_cv_draft_row(dict(row))
+        template_slug = draft_payload["template_slug"]
+    else:
+        source_kind, source_record = await _load_cv_target(
+            CvDraftBody(
+                template_slug=body.template_slug,
+                application_id=body.application_id,
+                result_id=body.result_id,
+            ),
+            current_user["id"],
+        )
+        target = build_target_snapshot(source_kind, source_record)
+        generated_draft = build_targeted_cv_draft(profile, target, body.template_slug)
+        draft_payload = {
+            "template_slug": generated_draft["template"]["slug"],
+            "selected_payload": generated_draft["selected_payload"],
+            "prompt_payload": generated_draft["prompt_payload"],
+        }
+        template_slug = generated_draft["template"]["slug"]
+
+    prompt_payload = _build_cover_letter_prompt_payload(profile, draft_payload)
+    try:
+        generated = generate_cover_letter(prompt_payload)
+    except AnthropicConfigError as error:
+        raise HTTPException(400, str(error))
+    except AnthropicResponseError as error:
+        raise HTTPException(502, str(error))
+
+    letter_text = str(generated.get("letter_text", "")).strip()
+    if not letter_text:
+        raise HTTPException(502, "Cover letter generation returned no text")
+
+    target = draft_payload["selected_payload"].get("target") or {}
+    try:
+        html = render_cover_letter_html(profile, target, letter_text, template_slug)
+        pdf_bytes = generate_pdf_from_html(html)
+    except RuntimeError as error:
+        raise HTTPException(500, str(error))
+
+    filename = f"toolscout-cover-letter-{body.draft_id or 'generated'}.pdf"
+    return {
+        "draft_id": body.draft_id,
+        "template_slug": template_slug,
+        "target": target,
+        "subject": str(generated.get("subject", "")).strip()[:180],
+        "letter_text": letter_text[:5000],
+        "compliance_notes": [
+            str(note).strip()[:220]
+            for note in generated.get("compliance_notes", [])
+            if str(note).strip()
+        ][:8],
+        "pdf_base64": base64.b64encode(pdf_bytes).decode("ascii"),
+        "file_name": filename,
+    }
 
 
 @app.post("/api/cv/drafts/generate")

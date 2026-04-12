@@ -13,9 +13,7 @@ import re
 import time
 from typing import Iterator
 
-from bs4 import BeautifulSoup
-
-from .base import BaseScraper, JobResult
+from .base import BaseScraper, JobResult, parse_html
 
 SEARCH_URL = "https://www.linkedin.com/jobs/search/"
 GUEST_URL = "https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{job_id}"
@@ -147,7 +145,7 @@ class LinkedInScraper(BaseScraper):
             return None
 
     def _parse_cards(self, html: str) -> list[dict]:
-        soup = BeautifulSoup(html, "lxml")
+        soup = parse_html(html)
         cards = []
 
         for el in soup.select("div[data-entity-urn*=jobPosting]"):
@@ -184,7 +182,7 @@ class LinkedInScraper(BaseScraper):
         if not resp:
             return ""
 
-        soup = BeautifulSoup(resp.text, "lxml")
+        soup = parse_html(resp.text)
 
         desc_el = soup.select_one(DESC_SEL)
         if desc_el:

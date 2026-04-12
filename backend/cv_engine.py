@@ -18,7 +18,8 @@ CV_TEMPLATE_LIBRARY = [
         "style": "classic",
         "color": "green",
         "engine": "LaTeX",
-        "repo_url": "https://github.com/xdanaux/moderncv",
+        "backend_renderer": "moderncv",
+        "supports_pdf": True,
         "description": "Base sobre pour candidatures generalistes, avec structure lisible et sections compactes.",
     },
     {
@@ -28,7 +29,8 @@ CV_TEMPLATE_LIBRARY = [
         "style": "banking",
         "color": "red",
         "engine": "LaTeX",
-        "repo_url": "https://github.com/xdanaux/moderncv",
+        "backend_renderer": "moderncv",
+        "supports_pdf": True,
         "description": "Version plus dense, utile pour profils data, finance et postes a forte composante analytique.",
     },
     {
@@ -38,7 +40,8 @@ CV_TEMPLATE_LIBRARY = [
         "style": "casual",
         "color": "orange",
         "engine": "LaTeX",
-        "repo_url": "https://github.com/xdanaux/moderncv",
+        "backend_renderer": "moderncv",
+        "supports_pdf": True,
         "description": "Variante plus editoriale, adaptee a un profil etudiant avec projets et portfolio.",
     },
 ]

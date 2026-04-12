@@ -8,9 +8,7 @@ import time
 from typing import Iterator
 from urllib.parse import urljoin
 
-from bs4 import BeautifulSoup
-
-from .base import BaseScraper, JobResult
+from .base import BaseScraper, JobResult, parse_html
 
 BASE_URL = "https://www.jobteaser.com"
 SEARCH_URL = "https://www.jobteaser.com/fr/job-offers"
@@ -240,7 +238,7 @@ class JobteaserScraper(BaseScraper):
         return bool(page.query_selector(self._RESULT_SELECTOR))
 
     def _parse_results_html(self, html: str) -> list[dict]:
-        soup = BeautifulSoup(html, "lxml")
+        soup = parse_html(html)
         cards = soup.select("[class*=JobAdCard_main]")
         jobs = []
 
@@ -287,7 +285,7 @@ class JobteaserScraper(BaseScraper):
             except Exception:
                 page.wait_for_timeout(500)
 
-            soup = BeautifulSoup(page.content(), "lxml")
+            soup = parse_html(page.content())
             desc_el = soup.select_one(self._DESC_SELECTORS)
             if desc_el:
                 return desc_el.get_text(" ", strip=True)

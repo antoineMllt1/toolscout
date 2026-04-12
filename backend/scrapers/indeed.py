@@ -7,9 +7,7 @@ job description from the side panel or the viewjob page.
 import time
 from typing import Iterator
 
-from bs4 import BeautifulSoup
-
-from .base import BaseScraper, JobResult
+from .base import BaseScraper, JobResult, parse_html
 
 SEARCH_URL = "https://fr.indeed.com/emplois"
 VIEWJOB_URL = "https://fr.indeed.com/viewjob?jk={jk}"
@@ -228,7 +226,7 @@ class IndeedScraper(BaseScraper):
         return bool(page.query_selector(self._CARD_SELECTORS))
 
     def _parse_cards(self, html: str) -> list[dict]:
-        soup = BeautifulSoup(html, "lxml")
+        soup = parse_html(html)
         cards = []
 
         for el in soup.select(self._CARD_SELECTORS):
@@ -273,7 +271,7 @@ class IndeedScraper(BaseScraper):
                 html = detail_page.content()
                 if "blocked - indeed" in html.lower() or "security check" in html.lower():
                     continue
-                soup = BeautifulSoup(html, "lxml")
+                soup = parse_html(html)
                 desc = soup.select_one(self._DESC_SEL)
                 if desc:
                     return desc.get_text(" ", strip=True)

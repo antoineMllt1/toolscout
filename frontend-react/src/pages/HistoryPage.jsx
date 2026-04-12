@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useSearch } from '../context/SearchContext'
+import AppPageHeader from '../components/AppPageHeader'
 
 function formatDate(value) {
   if (!value) return '-'
@@ -46,49 +47,27 @@ export default function HistoryPage({ onOpen }) {
 
   return (
     <main className="history-page">
-      <section className="history-layout">
-        <article className="hero-slab fade-stagger" style={{ '--index': 0 }}>
-          <div className="hero-copy">
-            <p className="eyebrow">Run archive</p>
-            <h1 className="history-display">Retrouve une recherche, meme apres navigation ou refresh.</h1>
-            <p className="lede">
-              Les runs restent restaurables pour revenir sur un flux d'annonces, un outil precis ou un tri deja lance.
-            </p>
-          </div>
-
-          <div className="history-meta-grid">
-            <div className="summary-card tone-blue">
-              <span>Runs completes</span>
-              <strong>{historyStats.completed}</strong>
-            </div>
-            <div className="summary-card tone-green">
-              <span>Runs actifs</span>
-              <strong>{historyStats.running}</strong>
-            </div>
-            <div className="summary-card tone-yellow">
-              <span>Annonces cumulees</span>
-              <strong>{historyStats.totalResults}</strong>
-            </div>
-          </div>
-        </article>
-
-        <aside className="hero-rail">
-          <article className="rail-panel fade-stagger" style={{ '--index': 1 }}>
-            <p className="eyebrow">Dernier contexte</p>
-            <h2>{latestRun ? latestRun.tool_name : 'Aucun run pour le moment'}</h2>
-            <p>
-              {latestRun
-                ? `${formatDate(latestRun.created_at)} - ${latestRun.total_results || 0} annonces`
-                : 'Lance une recherche depuis le workspace pour commencer a remplir cette archive.'}
-            </p>
-            {latestRun && (
-              <button className="text-action" onClick={() => onOpen(latestRun.id)}>
-                Restaurer ce run
-              </button>
-            )}
-          </article>
-        </aside>
-      </section>
+      <AppPageHeader
+        eyebrow="Run archive"
+        title="Historique des recherches"
+        description={
+          latestRun
+            ? `Dernier contexte: ${latestRun.tool_name} le ${formatDate(latestRun.created_at)}.`
+            : "Retrouve un run, restaure son contexte et repars exactement du bon endroit."
+        }
+        actions={
+          latestRun ? (
+            <button className="secondary-button" onClick={() => onOpen(latestRun.id)}>
+              Restaurer le dernier run
+            </button>
+          ) : null
+        }
+        stats={[
+          { label: 'Runs completes', value: historyStats.completed, tone: 'tone-blue' },
+          { label: 'Runs actifs', value: historyStats.running, tone: 'tone-green' },
+          { label: 'Annonces cumulees', value: historyStats.totalResults, tone: 'tone-yellow' },
+        ]}
+      />
 
       <section className="panel-shell fade-stagger" style={{ '--index': 2 }}>
         <div className="panel-head">

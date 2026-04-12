@@ -35,7 +35,7 @@ uvicorn main:app --host 127.0.0.1 --port 8000 --reload
 # 2. Frontend React (dev)
 cd frontend-react
 npm install
-npm run dev          # http://localhost:5173 avec proxy vers le backend
+npm run dev          # http://127.0.0.1:5173 avec proxy vers le backend
 
 # 2b. Ou build production (intégré au backend)
 cd frontend-react
@@ -95,7 +95,7 @@ Pour les renouveler :
 
 Ou via l'API :
 ```bash
-curl -X POST http://localhost:8000/api/config/cookies \
+curl -X POST http://127.0.0.1:8000/api/config/cookies \
   -H "Content-Type: application/json" \
   -d '{"source": "indeed", "cookies": {"cf_clearance": "VALEUR"}}'
 ```

@@ -303,7 +303,10 @@ async def get_current_user(authorization: str = Header(default="")):
 async def register(body: RegisterBody):
     if len(body.password) < 6:
         raise HTTPException(400, "Password must be at least 6 characters")
-    hashed = hash_password(body.password)
+    try:
+        hashed = hash_password(body.password)
+    except ValueError as error:
+        raise HTTPException(400, str(error))
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row

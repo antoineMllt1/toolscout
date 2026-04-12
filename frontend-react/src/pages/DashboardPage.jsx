@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import TagInput from '../components/TagInput'
+import AppPageHeader from '../components/AppPageHeader'
 import { useApplications } from '../context/ApplicationContext'
 import { useAuth } from '../context/AuthContext'
 import { useFavorites } from '../context/FavoritesContext'
@@ -36,6 +37,8 @@ const CADENCE_LABELS = {
   every_3_days: 'Tous les 3 jours',
   weekly: 'Chaque semaine',
 }
+
+const CV_TEMPLATE_STORAGE_KEY = 'sh_cv_preferred_template_v1'
 
 function ApplicationMiniCard({ app, onAdvance, onDelete }) {
   const nextStatus = app.status === 'saved'
@@ -190,6 +193,15 @@ export default function DashboardPage({ onNavigate }) {
   const interviewCount = applications.filter((app) => app.status === 'interview').length
   const nextReviewCard = applications.find((app) => app.status === 'saved') || applications[0] || null
 
+  function useTemplate(templateSlug) {
+    try {
+      localStorage.setItem(CV_TEMPLATE_STORAGE_KEY, templateSlug)
+    } catch {
+      // ignore storage failures
+    }
+    onNavigate('cv')
+  }
+
   if (!user) {
     return (
       <main className="dashboard-page">
@@ -206,72 +218,33 @@ export default function DashboardPage({ onNavigate }) {
 
   return (
     <main className="dashboard-page">
-      <section className="dashboard-hero-grid">
-        <article className="hero-slab dark fade-stagger" style={{ '--index': 0 }}>
-          <div className="hero-copy">
-            <p className="eyebrow is-light">Student cockpit</p>
-            <h1 className="dashboard-display">Construis un pipeline de stage qui ne se perd pas en route.</h1>
-            <p className="lede is-light">
-              Recherche, suivi de candidature, veille recurrente et base CV vivent dans le meme cockpit.
-              Le but est de garder un systeme fiable, pas un simple scraper jetable.
-            </p>
-          </div>
-
-          <div className="hero-action-row">
-            <button className="primary-button light" onClick={() => onNavigate('search')}>
+      <AppPageHeader
+        eyebrow="Student cockpit"
+        title="Pipeline candidatures"
+        description={
+          nextReviewCard
+            ? `Focus actuel: ${nextReviewCard.job_title} chez ${nextReviewCard.company_name || 'Entreprise'}.`
+            : 'Recherche, suivi candidature, veille et base CV vivent dans le meme cockpit.'
+        }
+        actions={
+          <>
+            <button className="primary-button" onClick={() => onNavigate('search')}>
               Revenir aux annonces
             </button>
-            <button className="secondary-button dark" onClick={() => onNavigate('history')}>
+            <button className="secondary-button" onClick={() => onNavigate('history')}>
               Voir les runs
             </button>
-          </div>
-
-          <div className="hero-stat-strip">
-            <div className="hero-stat-chip">
-              <span>Candidatures suivies</span>
-              <strong>{trackedCount}</strong>
-            </div>
-            <div className="hero-stat-chip">
-              <span>Veilles actives</span>
-              <strong>{activeWatchlists}</strong>
-            </div>
-            <div className="hero-stat-chip">
-              <span>Entretiens</span>
-              <strong>{interviewCount}</strong>
-            </div>
-          </div>
-        </article>
-
-        <aside className="hero-rail">
-          <article className="rail-panel fade-stagger" style={{ '--index': 1 }}>
-            <p className="eyebrow">Focus du jour</p>
-            <h2>{nextReviewCard?.job_title || 'Aucune carte en attente'}</h2>
-            <p>
-              {nextReviewCard
-                ? `${nextReviewCard.company_name || 'Entreprise non precisee'} - ${nextReviewCard.location || 'Lieu a verifier'}`
-                : 'Lance une recherche puis classe les offres les plus solides ici.'}
-            </p>
-            <button className="text-action" onClick={() => onNavigate('search')}>
-              Ouvrir le workspace
-            </button>
-          </article>
-
-          <div className="dashboard-summary-grid">
-            <article className="summary-card tone-blue fade-stagger" style={{ '--index': 2 }}>
-              <span>Templates CV</span>
-              <strong>{templates.length}</strong>
-            </article>
-            <article className="summary-card tone-green fade-stagger" style={{ '--index': 3 }}>
-              <span>Cartes a relire</span>
-              <strong>{board.find((column) => column.key === 'saved')?.items.length || 0}</strong>
-            </article>
-            <article className="summary-card tone-yellow fade-stagger" style={{ '--index': 4 }}>
-              <span>Favoris jobs</span>
-              <strong>{favorites.length}</strong>
-            </article>
-          </div>
-        </aside>
-      </section>
+          </>
+        }
+        stats={[
+          { label: 'Candidatures suivies', value: trackedCount, tone: 'tone-blue' },
+          { label: 'Veilles actives', value: activeWatchlists, tone: 'tone-green' },
+          { label: 'Entretiens', value: interviewCount, tone: 'tone-yellow' },
+          { label: 'Templates CV', value: templates.length },
+          { label: 'Cartes a relire', value: board.find((column) => column.key === 'saved')?.items.length || 0 },
+          { label: 'Favoris jobs', value: favorites.length },
+        ]}
+      />
 
       <section className="dashboard-grid">
         <div className="dashboard-main-column">
@@ -332,13 +305,14 @@ export default function DashboardPage({ onNavigate }) {
                   <div className="template-meta">
                     <span className="inline-badge">{template.style}</span>
                     <span className="inline-badge">{template.engine}</span>
+                    <span className="inline-badge">Backend-ready</span>
                   </div>
                   <div className="template-actions">
-                    <a className="text-action" href={template.repo_url} target="_blank" rel="noreferrer">
-                      Ouvrir le repo
-                    </a>
+                    <button className="text-action" onClick={() => useTemplate(template.slug)}>
+                      Utiliser ce template
+                    </button>
                     <button className="text-action" onClick={() => onNavigate('cv')}>
-                      Ouvrir le profil
+                      Ouvrir CV Studio
                     </button>
                   </div>
                 </article>

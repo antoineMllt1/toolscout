@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
+import AppPageHeader from '../components/AppPageHeader'
 import TagInput from '../components/TagInput'
+import ProfileAssistant from '../components/ProfileAssistant'
 import { useApplications } from '../context/ApplicationContext'
 import { useAuth } from '../context/AuthContext'
 import { useSearch } from '../context/SearchContext'
@@ -51,6 +53,8 @@ const EMPTY_PROFILE = {
   experience: [],
   projects: [],
 }
+
+const CV_TEMPLATE_STORAGE_KEY = 'sh_cv_preferred_template_v1'
 
 function linesToArray(value) {
   return value
@@ -559,7 +563,7 @@ function DraftCard({ draft, active, onSelect }) {
   )
 }
 
-export default function CvStudioPage({ onNavigate }) {
+export default function CvStudioPage({ onNavigate, pendingJob, onClearPendingJob }) {
   const { user, authFetch } = useAuth()
   const { applications } = useApplications()
   const { selectedResult } = useSearch()
@@ -581,6 +585,7 @@ export default function CvStudioPage({ onNavigate }) {
   const [coverLettersByDraft, setCoverLettersByDraft] = useState({})
   const [feedback, setFeedback] = useState('')
   const [feedbackTone, setFeedbackTone] = useState('info')
+  const [studioView, setStudioView] = useState(() => (pendingJob ? 'generate' : 'capture'))
 
   useEffect(() => {
     if (!selectedResult) {
@@ -592,6 +597,10 @@ export default function CvStudioPage({ onNavigate }) {
     if (!user) return
     void Promise.all([loadProfile(), loadTemplates(), loadDrafts()])
   }, [user])
+
+  useEffect(() => {
+    if (pendingJob) setStudioView('generate')
+  }, [pendingJob])
 
   const selectedDraft = useMemo(
     () => drafts.find((draft) => draft.id === selectedDraftId) || drafts[0] || null,
@@ -607,7 +616,16 @@ export default function CvStudioPage({ onNavigate }) {
   async function loadTemplates() {
     const response = await fetch('/api/cv/templates')
     if (!response.ok) return
-    setTemplates(await response.json())
+    const data = await response.json()
+    setTemplates(data)
+    try {
+      const preferredTemplate = localStorage.getItem(CV_TEMPLATE_STORAGE_KEY)
+      if (preferredTemplate && data.some((template) => template.slug === preferredTemplate)) {
+        setTemplateSlug(preferredTemplate)
+      }
+    } catch {
+      // ignore storage failures
+    }
   }
 
   async function loadDrafts() {
@@ -703,17 +721,54 @@ export default function CvStudioPage({ onNavigate }) {
     }
   }
 
+  async function generateDraftForJob(job) {
+    const resultId = job?.id || job?.search_result_id
+    if (!resultId) {
+      setFeedbackTone('danger')
+      setFeedback("Cette offre n'est pas liée à un résultat de recherche. Lance d'abord une recherche.")
+      return
+    }
+    setGeneratingDraft(true)
+    setFeedback('')
+    try {
+      const payload = { template_slug: templateSlug, result_id: resultId }
+      const response = await authFetch('/api/cv/drafts/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      const draft = await response.json()
+      if (!response.ok) {
+        throw new Error(draft.detail || 'Impossible de générer le draft')
+      }
+      setDrafts((prev) => [draft, ...prev.filter((item) => item.id !== draft.id)])
+      setSelectedDraftId(draft.id)
+      setFeedbackTone('info')
+      setFeedback(`CV généré pour "${job.job_title || 'ce poste'}" chez ${job.company_name || 'cette entreprise'}.`)
+      if (onClearPendingJob) onClearPendingJob()
+    } catch (error) {
+      setFeedbackTone('danger')
+      setFeedback(error.message)
+    } finally {
+      setGeneratingDraft(false)
+    }
+  }
+
   async function generateDraft() {
     setGeneratingDraft(true)
     setFeedback('')
     try {
       const payload = { template_slug: templateSlug }
-      if (sourceMode === 'selected-result' && selectedResult?.id) {
+      if (pendingJob) {
+        const resultId = pendingJob.id || pendingJob.search_result_id
+        if (!resultId) throw new Error("Cette offre n'est pas liée à un résultat de recherche.")
+        payload.result_id = resultId
+      } else if (sourceMode === 'selected-result' && selectedResult?.id) {
         payload.result_id = selectedResult.id
       } else if (applicationId) {
         payload.application_id = Number(applicationId)
       } else {
-        throw new Error('Choisis une annonce ou une candidature pour generer le draft.')
+        throw new Error('Choisis une annonce ou une candidature pour générer le draft.')
       }
 
       const response = await authFetch('/api/cv/drafts/generate', {
@@ -831,89 +886,196 @@ export default function CvStudioPage({ onNavigate }) {
   const applicationPlan = profile.application_plan || EMPTY_PROFILE.application_plan
   const portfolioSnapshot = profile.portfolio_snapshot || {}
   const sourceHealth = candidateBrief.source_health || {}
+  const profileCompletion = [
+    Boolean(profile.summary?.trim()),
+    (profile.experience || []).length > 0,
+    (profile.projects || []).length > 0,
+    (profile.education || []).length > 0,
+  ].filter(Boolean).length
+  const profileCompletionPercent = Math.round((profileCompletion / 4) * 100)
+  const studioSections = [
+    {
+      id: 'capture',
+      step: '01',
+      title: 'Base candidat',
+      note: 'CV brut, portfolio et identite',
+      metric: `${profileCompletionPercent}%`,
+    },
+    {
+      id: 'evidence',
+      step: '02',
+      title: 'Preuves',
+      note: 'Experiences, projets et lecture profil',
+      metric: `${(profile.experience || []).length + (profile.projects || []).length + (profile.education || []).length}`,
+    },
+    {
+      id: 'generate',
+      step: '03',
+      title: 'Generation',
+      note: 'Template, cible, drafts et PDF',
+      metric: `${drafts.length}`,
+    },
+    {
+      id: 'coach',
+      step: '04',
+      title: 'Coaching',
+      note: 'Entretien, histoires et projets',
+      metric: `${(studentGuidance.story_starters || []).length + (studentGuidance.project_ideas || []).length}`,
+    },
+  ]
 
   return (
     <main className="cv-page">
-      <section className="cv-hero-grid">
-        <article className="hero-slab dark fade-stagger" style={{ '--index': 0 }}>
-          <div className="hero-copy">
-            <p className="eyebrow is-light">Candidate profile</p>
-            <h1 className="dashboard-display">Ton CV general, ton portfolio et tes preuves de stage au meme endroit.</h1>
-            <p className="lede is-light">
-              Le but n&apos;est pas seulement de remplir un CV. Cette page sert a comprendre ton profil,
-              recuperer les bons projets depuis ton portfolio, puis transformer tout ca en candidatures plus solides.
+
+      {/* PENDING JOB BANNER */}
+      {pendingJob && (
+        <div style={{
+          margin: '0 0 0 0',
+          padding: '16px 24px',
+          background: 'linear-gradient(135deg, #1E1B4B 0%, #312E81 100%)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: '16px',
+        }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+            <p style={{ margin: 0, fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'rgba(255,255,255,0.45)' }}>
+              Génération de CV demandée
+            </p>
+            <p style={{ margin: 0, fontSize: '15px', fontWeight: 700, color: 'white' }}>
+              {pendingJob.job_title || 'Poste'} — {pendingJob.company_name || 'Entreprise'}
             </p>
           </div>
+          <div style={{ display: 'flex', gap: '8px', flexShrink: 0 }}>
+            <button
+              className="primary-button light"
+              disabled={generatingDraft}
+              onClick={() => generateDraftForJob(pendingJob)}
+            >
+              {generatingDraft ? 'Génération…' : '✦ Générer le CV maintenant'}
+            </button>
+            <button
+              className="secondary-button dark"
+              onClick={onClearPendingJob}
+            >
+              Ignorer
+            </button>
+          </div>
+        </div>
+      )}
 
-          <div className="hero-action-row">
-            <button className="primary-button light" onClick={() => onNavigate('search')}>
+      <AppPageHeader
+        eyebrow="CV Studio"
+        title="Base candidat et CV cibles"
+        description={
+          portfolioSnapshot.domain
+            ? `${portfolioSnapshot.domain} synchronise le ${formatDate(profile.portfolio_last_scraped_at)}.`
+            : "Centralise ton CV brut, ton portfolio et tes versions ciblees dans un seul studio."
+        }
+        actions={
+          <>
+            <button className="primary-button" onClick={() => onNavigate('search')}>
               Retour aux annonces
             </button>
-            <button className="secondary-button dark" onClick={() => onNavigate('dashboard')}>
-              Ouvrir le cockpit
+            <button className="secondary-button" onClick={() => onNavigate('favorites')}>
+              Mes offres sauvegardees
             </button>
-          </div>
+          </>
+        }
+        stats={[
+          { label: 'Base profil', value: `${profileCompletionPercent}%`, tone: 'tone-blue' },
+          { label: 'Portfolio', value: sourceHealth.has_portfolio ? 'Connecte' : 'A relier', tone: 'tone-green' },
+          { label: 'Projets', value: profile.projects.length, tone: 'tone-yellow' },
+          { label: 'Roles cibles', value: profile.target_roles.length },
+          { label: 'Readiness', value: `${applicationPlan.readiness_score || 0}%` },
+          { label: 'Drafts', value: drafts.length },
+        ]}
+      />
 
-          <div className="hero-stat-strip">
-            <div className="hero-stat-chip">
-              <span>CV master</span>
-              <strong>{sourceHealth.has_cv_text ? 'Oui' : 'A faire'}</strong>
-            </div>
-            <div className="hero-stat-chip">
-              <span>Portfolio</span>
-              <strong>{sourceHealth.has_portfolio ? 'Connecte' : 'A relier'}</strong>
-            </div>
-            <div className="hero-stat-chip">
-              <span>Projets</span>
-              <strong>{profile.projects.length}</strong>
-            </div>
+      <section className="cv-studio-switcher fade-stagger" style={{ '--index': 1 }}>
+        <div className="cv-studio-switcher-head">
+          <div>
+            <p className="eyebrow">Workspace</p>
+            <h2>Choisis la vue utile maintenant</h2>
           </div>
-        </article>
-
-        <aside className="hero-rail">
-          <article className="rail-panel fade-stagger" style={{ '--index': 1 }}>
-            <p className="eyebrow">Lecture rapide</p>
-            <h2>{portfolioSnapshot.page_title || 'Aucun portfolio scrape pour le moment'}</h2>
-            <p>
-              {portfolioSnapshot.domain
-                ? `${portfolioSnapshot.domain} - dernier import ${formatDate(profile.portfolio_last_scraped_at)}`
-                : 'Ajoute ton portfolio pour recuperer des projets et des signaux utiles.'}
-            </p>
-            {portfolioSnapshot.final_url ? (
-              <a className="text-action" href={portfolioSnapshot.final_url} target="_blank" rel="noreferrer">
-                Ouvrir le portfolio
-              </a>
-            ) : null}
-          </article>
-
-          <div className="dashboard-summary-grid">
-            <InsightMetric label="Roles cibles" value={profile.target_roles.length} tone="tone-blue" />
-            <InsightMetric label="Readiness" value={`${applicationPlan.readiness_score || 0}%`} tone="tone-green" />
-            <InsightMetric label="Drafts" value={drafts.length} tone="tone-yellow" />
-          </div>
-        </aside>
+          <p className="panel-note">Le studio est organise par mode de travail, pas comme une longue page a scroller.</p>
+        </div>
+        <div className="cv-studio-switcher-grid">
+          {studioSections.map((section) => (
+            <button
+              key={section.id}
+              type="button"
+              className={`cv-workflow-card ${studioView === section.id ? 'is-active' : ''}`}
+              onClick={() => setStudioView(section.id)}
+            >
+              <span>{section.step}</span>
+              <strong>{section.title}</strong>
+              <p>{section.note}</p>
+              <em>{section.metric}</em>
+            </button>
+          ))}
+        </div>
       </section>
 
-      <section className="cv-layout">
+      <section className={`cv-layout studio-view-${studioView}`}>
         <div className="cv-main-column">
-          <section className="panel-shell fade-stagger" style={{ '--index': 2 }}>
+          <ProfileAssistant
+            profile={profile}
+            setProfile={setProfile}
+            onSave={saveProfile}
+            saving={savingProfile}
+          />
+
+          <section className="panel-shell cv-stage-panel cv-stage-panel-prep fade-stagger" style={{ '--index': 2 }}>
             <SectionHeader
-              eyebrow="Source of truth"
-              title="CV general et portfolio"
-              note="Pense comme un etudiant: un CV master brut + un portfolio vivant = la meilleure base pour toutes les candidatures."
+              eyebrow="Etape 1"
+              title="Sources candidat"
+              note="Le plus utile ici, c'est ton portfolio, ton CV importe et les liens qui alimentent le profil sans te faire perdre du temps."
             />
 
             <div className="source-truth-grid">
-              <label className="field-stack cv-raw-source">
-                <span>CV general brut</span>
-                <textarea
-                  className="cv-raw-editor"
-                  rows={16}
-                  value={profile.cv_text}
-                  onChange={(event) => setProfile((prev) => ({ ...prev, cv_text: event.target.value }))}
-                  placeholder="Colle ici ton CV complet en texte brut ou markdown. Le systeme s'en sert comme source de contexte, meme si tu structures aussi les sections plus bas."
-                />
-              </label>
+              <div className="cv-source-stack">
+                <article className="portfolio-summary-card cv-source-card">
+                  <div className="portfolio-summary-head">
+                    <div>
+                      <p className="eyebrow">CV importe</p>
+                      <h3>{profile.cv_text?.trim() ? 'Un CV existe deja en base' : 'Aucun CV importe pour le moment'}</h3>
+                    </div>
+                  </div>
+                  <p>
+                    Le backend peut encore utiliser un CV importe comme matiere de contexte, mais tu n'as plus besoin de le coller ici a la main.
+                  </p>
+                  <label className="field-stack">
+                    <span>Importer un CV existant</span>
+                    <input
+                      type="file"
+                      accept=".pdf,.docx,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown"
+                      onChange={uploadCvFile}
+                      disabled={uploadingCv}
+                    />
+                  </label>
+                </article>
+
+                <article className="portfolio-summary-card cv-source-card">
+                  <div className="portfolio-summary-head">
+                    <div>
+                      <p className="eyebrow">Portfolio sync</p>
+                      <h3>{portfolioSnapshot.domain || 'Pas encore synchronise'}</h3>
+                    </div>
+                    {portfolioSnapshot.links?.github ? (
+                      <a className="text-action" href={portfolioSnapshot.links.github} target="_blank" rel="noreferrer">
+                        GitHub
+                      </a>
+                    ) : null}
+                  </div>
+                  <p>{portfolioSnapshot.narrative || 'Le scrape detecte les pages, projets, technos et liens visibles sur ton portfolio.'}</p>
+                  <div className="coach-chip-row">
+                    <span className="inline-badge">{portfolioSnapshot.projects?.length || 0} projet(s)</span>
+                    <span className="inline-badge">{portfolioSnapshot.skills?.length || 0} skill(s)</span>
+                    <span className="inline-badge">Mis a jour {formatDate(profile.portfolio_last_scraped_at)}</span>
+                  </div>
+                </article>
+              </div>
 
               <div className="source-truth-side">
                 <label className="field-stack">
@@ -922,16 +1084,6 @@ export default function CvStudioPage({ onNavigate }) {
                     value={profile.portfolio_url}
                     onChange={(event) => setProfile((prev) => ({ ...prev, portfolio_url: event.target.value }))}
                     placeholder="https://ton-portfolio.dev"
-                  />
-                </label>
-
-                <label className="field-stack">
-                  <span>Importer un CV existant</span>
-                  <input
-                    type="file"
-                    accept=".pdf,.docx,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown"
-                    onChange={uploadCvFile}
-                    disabled={uploadingCv}
                   />
                 </label>
 
@@ -945,35 +1097,24 @@ export default function CvStudioPage({ onNavigate }) {
                 </div>
 
                 {feedback ? <div className={`feedback-box ${feedbackTone === 'danger' ? 'danger' : 'info'}`}>{feedback}</div> : null}
-
                 <div className="portfolio-summary-card">
                   <div className="portfolio-summary-head">
                     <div>
-                      <p className="eyebrow">Portfolio sync</p>
-                      <h3>{portfolioSnapshot.domain || 'Pas encore synchronise'}</h3>
+                      <p className="eyebrow">Pourquoi c'est mieux</p>
+                      <h3>Le studio se base sur des signaux utiles</h3>
                     </div>
-                    {portfolioSnapshot.links?.github ? (
-                      <a className="text-action" href={portfolioSnapshot.links.github} target="_blank" rel="noreferrer">
-                        GitHub
-                      </a>
-                    ) : null}
                   </div>
-                  <p>{portfolioSnapshot.narrative || 'Le scrape va detecter les pages, projets, technos et liens visibles sur ton portfolio.'}</p>
-                  <div className="coach-chip-row">
-                    <span className="inline-badge">{portfolioSnapshot.projects?.length || 0} projet(s)</span>
-                    <span className="inline-badge">{portfolioSnapshot.skills?.length || 0} skill(s)</span>
-                    <span className="inline-badge">Mis a jour {formatDate(profile.portfolio_last_scraped_at)}</span>
-                  </div>
+                  <p>Portfolio, experiences, projets, roles cibles et imports sont plus exploitables qu'un gros champ texte colle brut.</p>
                 </div>
               </div>
             </div>
           </section>
 
-          <section className="panel-shell fade-stagger" style={{ '--index': 3 }}>
+          <section className="panel-shell cv-stage-panel cv-stage-panel-prep fade-stagger" style={{ '--index': 3 }}>
             <SectionHeader
-              eyebrow="Positioning"
+              eyebrow="Etape 1"
               title="Identite et roles cibles"
-              note="Ces champs servent a orienter le profil, les entrainements et les idees de projets a construire."
+              note="Rends ton profil lisible tout de suite: qui tu es, ce que tu sais faire et ce que tu vises."
             />
 
             <div className="cv-entry-grid cv-basics-grid">
@@ -1029,11 +1170,11 @@ export default function CvStudioPage({ onNavigate }) {
             </div>
           </section>
 
-          <section className="panel-shell fade-stagger" style={{ '--index': 4 }}>
+          <section className="panel-shell cv-stage-panel cv-stage-panel-review fade-stagger" style={{ '--index': 4 }}>
             <SectionHeader
-              eyebrow="Candidate signal"
-              title="Synthese automatique de ton profil"
-              note="Cette couche sert a mieux lire ton profil avant de personnaliser les candidatures."
+              eyebrow="Lecture automatique"
+              title="Comment ton profil ressort"
+              note="Une lecture synthese pour voir rapidement les angles forts, les signaux clairs et ce qui manque."
             />
 
             <div className="candidate-brief-grid">
@@ -1083,11 +1224,11 @@ export default function CvStudioPage({ onNavigate }) {
             ) : null}
           </section>
 
-          <section className="panel-shell fade-stagger" style={{ '--index': 5 }}>
+          <section className="panel-shell cv-stage-panel cv-stage-panel-review fade-stagger" style={{ '--index': 5 }}>
             <SectionHeader
-              eyebrow="Apply ready"
+              eyebrow="Avant d'envoyer"
               title="Checklist de readiness"
-              note="Une vue simple pour savoir si ton dossier est deja presentable ou s'il manque encore des pieces importantes."
+              note="Une vue nette pour savoir si ton dossier est deja presentable ou s'il manque encore des pieces importantes."
             />
 
             <div className="readiness-hero">
@@ -1125,11 +1266,11 @@ export default function CvStudioPage({ onNavigate }) {
             </div>
           </section>
 
-          <section className="panel-shell fade-stagger" style={{ '--index': 6 }}>
+          <section className="panel-shell cv-stage-panel cv-stage-panel-core fade-stagger" style={{ '--index': 6 }}>
             <SectionHeader
-              eyebrow="Evidence bank"
+              eyebrow="Etape 1"
               title="Experiences, projets et formation"
-              note="C'est la matiere premiere des story starters, du CV cible et de tes futures candidatures."
+              note="C'est ta banque de preuves. Plus elle est concrete, plus tes CV et tes entretiens deviennent faciles."
             />
 
             <div className="cv-editor-stack">
@@ -1147,11 +1288,11 @@ export default function CvStudioPage({ onNavigate }) {
         </div>
 
         <aside className="cv-side-column">
-          <section className="panel-shell fade-stagger" style={{ '--index': 7 }}>
+          <section className="panel-shell cv-support-panel fade-stagger" style={{ '--index': 7 }}>
             <SectionHeader
-              eyebrow="Training"
-              title="Story starters pour l'entretien"
-              note="Pas des reponses toutes faites. Des points de depart a retravailler en STAR."
+              eyebrow="Aide entretien"
+              title="Story starters"
+              note="Des points de depart a retravailler en STAR, pas des reponses toutes faites."
             />
 
             <div className="coach-stack">
@@ -1163,11 +1304,11 @@ export default function CvStudioPage({ onNavigate }) {
             </div>
           </section>
 
-          <section className="panel-shell fade-stagger" style={{ '--index': 8 }}>
+          <section className="panel-shell cv-support-panel fade-stagger" style={{ '--index': 8 }}>
             <SectionHeader
-              eyebrow="Interview drills"
+              eyebrow="Aide entretien"
               title="Questions a bosser"
-              note="Des questions probables, reliees a tes roles cibles et a ce que ton profil montre deja."
+              note="Les questions les plus probables, reliees a tes roles cibles et a ton profil."
             />
 
             <div className="coach-stack">
@@ -1197,11 +1338,11 @@ export default function CvStudioPage({ onNavigate }) {
             </div>
           </section>
 
-          <section className="panel-shell fade-stagger" style={{ '--index': 9 }}>
+          <section className="panel-shell cv-support-panel fade-stagger" style={{ '--index': 9 }}>
             <SectionHeader
-              eyebrow="Build next"
+              eyebrow="Aide portfolio"
               title="Idees de projets a lancer"
-              note="Inspire de career-ops, mais pense pour un etudiant: des projets faisables qui renforcent un dossier de stage."
+              note="Des projets faisables qui renforcent vraiment un dossier de stage ou d'alternance."
             />
 
             <div className="coach-stack">
@@ -1213,16 +1354,27 @@ export default function CvStudioPage({ onNavigate }) {
             </div>
           </section>
 
-          <section className="panel-shell fade-stagger" style={{ '--index': 10 }}>
+          <section className="panel-shell cv-cockpit-panel cv-generation-panel fade-stagger" style={{ '--index': 10 }}>
             <SectionHeader
-              eyebrow="Generation"
+              eyebrow="Etape 2"
               title="Generer un CV cible"
-              note="Tu peux partir d'une annonce selectionnee ou d'une candidature sauvegardee."
+              note="Choisis un template, une cible, puis lance un draft PDF pret a relire."
             />
 
             <label className="field-stack">
               <span>Template moderncv</span>
-              <select value={templateSlug} onChange={(event) => setTemplateSlug(event.target.value)}>
+              <select
+                value={templateSlug}
+                onChange={(event) => {
+                  const nextTemplate = event.target.value
+                  setTemplateSlug(nextTemplate)
+                  try {
+                    localStorage.setItem(CV_TEMPLATE_STORAGE_KEY, nextTemplate)
+                  } catch {
+                    // ignore storage failures
+                  }
+                }}
+              >
                 {templates.map((template) => (
                   <option key={template.slug} value={template.slug}>
                     {template.name}
@@ -1280,8 +1432,8 @@ export default function CvStudioPage({ onNavigate }) {
             </button>
           </section>
 
-          <section className="panel-shell fade-stagger" style={{ '--index': 11 }}>
-            <SectionHeader eyebrow="Drafts" title="Versions generees" />
+          <section className="panel-shell cv-cockpit-panel cv-drafts-panel fade-stagger" style={{ '--index': 11 }}>
+            <SectionHeader eyebrow="Etape 2" title="Versions generees" note="Retrouve ici chaque version ciblee, puis ouvre celle a revoir." />
             <div className="cv-draft-stack">
               {drafts.length === 0 ? (
                 <div className="cv-empty-slot">Aucun draft genere pour le moment.</div>
@@ -1293,11 +1445,11 @@ export default function CvStudioPage({ onNavigate }) {
             </div>
           </section>
 
-          <section className="panel-shell fade-stagger" style={{ '--index': 12 }}>
+          <section className="panel-shell cv-cockpit-panel cv-preview-panel fade-stagger" style={{ '--index': 12 }}>
             <SectionHeader
-              eyebrow="Preview"
+              eyebrow="Etape 3"
               title={selectedDraft ? selectedDraft.target_title || 'Draft selectionne' : 'Aucun draft'}
-              note={selectedDraft ? selectedDraft.target_company : 'Genere un draft pour afficher la selection ciblee.'}
+              note={selectedDraft ? selectedDraft.target_company : "Genere un draft pour afficher la version ciblee, la relire et l'exporter."}
             />
 
             {selectedDraft ? (

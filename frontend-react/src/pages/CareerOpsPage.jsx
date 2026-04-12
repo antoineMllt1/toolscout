@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import AppPageHeader from '../components/AppPageHeader'
 import TagInput from '../components/TagInput'
 import { useAuth } from '../context/AuthContext'
 import { useFavorites } from '../context/FavoritesContext'
@@ -328,35 +329,28 @@ export default function CareerOpsPage({ onNavigate }) {
 
   return (
     <main className="ops-page">
-      <section className="ops-hero-grid">
-        <article className="hero-slab dark fade-stagger" style={{ '--index': 0 }}>
-          <div className="hero-copy">
-            <p className="eyebrow is-light">Career ops</p>
-            <h1 className="dashboard-display">Une couche de veille et de priorisation.</h1>
-            <p className="lede is-light">
-              Suis tes societes cibles, garde les meilleures annonces en favoris, puis transforme
-              les signaux en actions.
-            </p>
-          </div>
-          <div className="hero-action-row">
-            <button className="primary-button light" onClick={() => onNavigate('search')}>
+      <AppPageHeader
+        eyebrow="Career ops"
+        title="Veille, priorisation et actions"
+        description="Suis tes societes cibles, garde les meilleures annonces et transforme les signaux en actions concretes."
+        actions={
+          <>
+            <button className="primary-button" onClick={() => onNavigate('search')}>
               Retour recherche
             </button>
-            <button className="secondary-button dark" onClick={() => onNavigate('dashboard')}>
+            <button className="secondary-button" onClick={() => onNavigate('dashboard')}>
               Retour cockpit
             </button>
-          </div>
-        </article>
+          </>
+        }
+        stats={[
+          { label: 'Societes suivies', value: portals.length, tone: 'tone-blue' },
+          { label: 'Favoris jobs', value: favoriteJobs.length, tone: 'tone-green' },
+          { label: 'Nouveaux liens', value: portalStats.newJobs, tone: 'tone-yellow' },
+        ]}
+      />
 
-        <aside className="hero-rail">
-          <div className="dashboard-summary-grid">
-            <StatCard label="Societes suivies" value={portals.length} tone="tone-blue" />
-            <StatCard label="Favoris jobs" value={favoriteJobs.length} tone="tone-green" />
-            <StatCard label="Nouveaux liens" value={portalStats.newJobs} tone="tone-yellow" />
-          </div>
-          {feedback ? <div className="feedback-box info">{feedback}</div> : null}
-        </aside>
-      </section>
+      {feedback ? <div className="feedback-box info">{feedback}</div> : null}
 
       <section className="ops-layout">
         <div className="ops-main-column">

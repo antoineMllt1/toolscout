@@ -14,6 +14,11 @@ try:
 except ModuleNotFoundError:
     from backend.portfolio_ingest import ROLE_PLAYBOOKS, _normalize_text, _match_playbooks
 
+try:
+    from scrapers.base import parse_html
+except ModuleNotFoundError:
+    from backend.scrapers.base import parse_html
+
 
 REQUEST_HEADERS = {
     "User-Agent": (
@@ -95,7 +100,7 @@ def _fetch_html(url: str) -> tuple[str, BeautifulSoup]:
         normalized_url = f"https://{normalized_url}"
     response = requests.get(normalized_url, headers=REQUEST_HEADERS, timeout=REQUEST_TIMEOUT_SECONDS)
     response.raise_for_status()
-    return response.url, BeautifulSoup(response.text, "lxml")
+    return response.url, parse_html(response.text)
 
 
 def scan_company_portal(company_name: str, careers_url: str) -> dict:

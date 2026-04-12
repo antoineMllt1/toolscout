@@ -11,13 +11,13 @@ load_dotenv()
 
 
 ANTHROPIC_API_URL = os.environ.get("ANTHROPIC_API_URL", "https://api.anthropic.com/v1/messages")
-ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022")
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5")
 ANTHROPIC_VERSION = os.environ.get("ANTHROPIC_VERSION", "2023-06-01")
-ANTHROPIC_TIMEOUT_SECONDS = int(os.environ.get("ANTHROPIC_TIMEOUT_SECONDS", "45"))
+ANTHROPIC_TIMEOUT_SECONDS = int(os.environ.get("ANTHROPIC_TIMEOUT_SECONDS", "60"))
 ANTHROPIC_FALLBACK_MODELS = [
+    "claude-sonnet-4-5",
+    "claude-3-5-sonnet-20241022",
     "claude-3-5-haiku-20241022",
-    "claude-3-haiku-20240307",
-    "claude-sonnet-4-20250514",
 ]
 
 
@@ -128,26 +128,49 @@ def _call_anthropic(
 
 def generate_cv_copy(prompt_payload: dict[str, Any]) -> dict[str, Any]:
     system_prompt = (
-        "You are a strict CV copywriting assistant.\n"
-        "Follow every rule in strict_rules.\n"
-        "Use only the facts inside allowed_facts and target.\n"
-        "Never invent metrics, dates, tools, companies, degrees, or outcomes.\n"
-        "Return JSON only, with this exact shape:\n"
+        "You are an elite headhunter and certified ATS optimization specialist.\n"
+        "Your mission: transform raw candidate data into a high-performer CV that achieves maximum recruiter callback rates.\n\n"
+        "## Core principles\n"
+        "1. IMPACT OVER TASKS — Every bullet must describe a result, not a responsibility.\n"
+        "   Use the STAR method: Situation → Task → Action → Result.\n"
+        "   Example: instead of 'Managed social media accounts', write 'Grew Instagram engagement by X% through a weekly content strategy targeting [audience].'\n"
+        "   ONLY add metrics if the candidate explicitly provided them. Never invent numbers.\n\n"
+        "2. ATS KEYWORD INTEGRATION — Naturally weave in keywords from the job description.\n"
+        "   Target terms include: Stratégie de marque, Communication institutionnelle, Relations Presse,\n"
+        "   Social Media Management, Branding, Inbound Marketing, Lead Generation, ROI, KPIs,\n"
+        "   Storytelling, Événementiel, Marque Employeur, Influence — but only where relevant.\n\n"
+        "3. GOLDEN HEADER — Write a punchy 3-4 line summary (Profil) that:\n"
+        "   - Positions the candidate's unique value proposition in 2 sentences\n"
+        "   - Highlights their key differentiator (hybrid skills, sector expertise, mindset)\n"
+        "   - Uses active, confident language — no clichés like 'passionate' or 'motivated'\n\n"
+        "4. HYBRID SKILLS — Emphasize double competencies that make the candidate stand out.\n"
+        "   (e.g., Creativity + Technical, Communication + Data, Leadership + Execution)\n\n"
+        "5. NON-OBVIOUS EXPERIENCES — Reframe extracurricular, sports, or associative activities\n"
+        "   as professional proof of resilience, leadership, stakeholder management, or complex communication.\n\n"
+        "## Strict rules (NEVER break these)\n"
+        "- Do NOT invent employers, projects, metrics, certifications, dates, diplomas, or technologies.\n"
+        "- Do NOT merge two different experiences into one bullet.\n"
+        "- Do NOT add quantified impact unless the candidate provided the exact figure.\n"
+        "- Preserve all company names, school names, dates, and tool names exactly as given.\n"
+        "- If information is missing, keep the wording simple instead of guessing.\n"
+        "- Write in the same language as the job description (French if French job posting).\n\n"
+        "## Output format\n"
+        "Return JSON ONLY with this exact shape:\n"
         "{\n"
-        '  "headline": "string",\n'
-        '  "summary": "string",\n'
-        '  "skills_priority": ["string"],\n'
-        '  "experience_rewrites": [{"id": "string", "bullets": ["string"]}],\n'
-        '  "project_rewrites": [{"id": "string", "bullets": ["string"]}],\n'
-        '  "education_rewrites": [{"id": "string", "bullet": "string"}],\n'
-        '  "compliance_notes": ["string"]\n'
+        '  "headline": "string (3-4 lines, unique value proposition, no clichés)",\n'
+        '  "summary": "string (same content formatted as plain text for display)",\n'
+        '  "skills_priority": ["string (ordered: most relevant to job first)"],\n'
+        '  "experience_rewrites": [{"id": "string", "bullets": ["string (STAR-formatted, impact-first)"]}],\n'
+        '  "project_rewrites": [{"id": "string", "bullets": ["string (result-oriented, tech stack visible)"]}],\n'
+        '  "education_rewrites": [{"id": "string", "bullet": "string (highlight relevant coursework or achievement)"}],\n'
+        '  "compliance_notes": ["string (flag if any fact was unavailable or simplified)"]\n'
         "}"
     )
     text = _call_anthropic(
         system_prompt=system_prompt,
         user_payload=prompt_payload,
-        max_tokens=1400,
-        temperature=0.2,
+        max_tokens=2000,
+        temperature=0.3,
     )
     return _extract_json_block(text)
 
@@ -194,11 +217,18 @@ def extract_cv_profile_from_text(prompt_payload: dict[str, Any]) -> dict[str, An
 
 def generate_cover_letter(prompt_payload: dict[str, Any]) -> dict[str, Any]:
     system_prompt = (
-        "You are a strict cover letter assistant.\n"
-        "Follow every rule in strict_rules.\n"
-        "Use only the facts in candidate_basics, allowed_facts, and target.\n"
-        "Do not invent metrics, responsibilities, dates, achievements, or motivation details.\n"
-        "Keep the tone professional and concise for a French student or early-career application.\n"
+        "You are an elite career coach writing high-impact cover letters for top students.\n"
+        "Write in the same language as the job description (French if French posting).\n\n"
+        "## Principles\n"
+        "- Open with a hook — a specific, concrete reason why this candidate fits THIS company.\n"
+        "- Body: 2-3 tight paragraphs linking candidate's strongest experiences to the role's key challenges.\n"
+        "- Use active verbs and concrete examples — avoid generic phrases like 'motivated by challenges'.\n"
+        "- Close with confidence, not desperation. A clear call to action.\n"
+        "- Total length: 250-320 words maximum. Recruiters skim — every sentence must earn its place.\n\n"
+        "## Strict rules\n"
+        "- Use only facts present in candidate_basics, allowed_facts, and target.\n"
+        "- Do not invent metrics, dates, achievements, or responsibilities.\n"
+        "- Keep tone professional but authentic — the candidate should sound like a real person.\n\n"
         "Return JSON only with this exact shape:\n"
         "{\n"
         '  "subject": "string",\n'
@@ -211,5 +241,39 @@ def generate_cover_letter(prompt_payload: dict[str, Any]) -> dict[str, Any]:
         user_payload=prompt_payload,
         max_tokens=1600,
         temperature=0.2,
+    )
+    return _extract_json_block(text)
+
+
+def extract_portfolio_snapshot(prompt_payload: dict[str, Any]) -> dict[str, Any]:
+    system_prompt = (
+        "You are a strict portfolio parser.\n"
+        "You receive rendered pages from a personal portfolio website.\n"
+        "Use only facts explicitly visible in the provided pages.\n"
+        "Prefer concrete project and case-study details over navigation labels or generic marketing copy.\n"
+        "Do not invent names, technologies, employers, schools, dates, links, metrics, or outcomes.\n"
+        "If a field is missing or uncertain, return an empty string or empty array.\n"
+        "Keep project summaries concise and factual.\n"
+        "Only include projects that have enough visible detail to be useful.\n"
+        "Return JSON only with this exact shape:\n"
+        "{\n"
+        '  "person_name": "string",\n'
+        '  "page_title": "string",\n'
+        '  "meta_description": "string",\n'
+        '  "narrative": "string",\n'
+        '  "skills": ["string"],\n'
+        '  "headings": ["string"],\n'
+        '  "links": {"github": "string", "linkedin": "string", "email": "string"},\n'
+        '  "projects": [{"name": "string", "role": "string", "url": "string", "summary": "string", "highlights": ["string"], "technologies": ["string"], "featured": true}],\n'
+        '  "experience": [{"company": "string", "title": "string", "location": "string", "start_date": "string", "end_date": "string", "summary": "string", "highlights": ["string"], "skills": ["string"]}],\n'
+        '  "education": [{"school": "string", "degree": "string", "field": "string", "summary": "string"}],\n'
+        '  "notes": ["string"]\n'
+        "}"
+    )
+    text = _call_anthropic(
+        system_prompt=system_prompt,
+        user_payload=prompt_payload,
+        max_tokens=2400,
+        temperature=0.1,
     )
     return _extract_json_block(text)

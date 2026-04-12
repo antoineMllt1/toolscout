@@ -5,6 +5,8 @@ import requests
 from dataclasses import dataclass, field
 from typing import Iterator, Optional
 
+from bs4 import BeautifulSoup
+
 # Tool aliases — search also finds alternate names
 TOOL_ALIASES: dict[str, list[str]] = {
     "make": ["make", "make.com", "integromat"],
@@ -87,6 +89,13 @@ DEFAULT_HEADERS = {
     "Upgrade-Insecure-Requests": "1",
     "DNT": "1",
 }
+
+try:
+    import lxml  # noqa: F401
+
+    HTML_PARSER = "lxml"
+except Exception:
+    HTML_PARSER = "html.parser"
 
 
 @dataclass
@@ -193,3 +202,7 @@ class BaseScraper:
 
     def sleep(self):
         time.sleep(self.DELAY)
+
+
+def parse_html(markup: str) -> BeautifulSoup:
+    return BeautifulSoup(markup, HTML_PARSER)

@@ -1,6 +1,28 @@
-import { createContext, useContext, useState, useEffect, useCallback } from 'react'
+import { createContext, useContext, useState, useEffect } from 'react'
 
 const AuthContext = createContext(null)
+
+async function readResponsePayload(response) {
+  const text = await response.text()
+  if (!text) return null
+
+  try {
+    return JSON.parse(text)
+  } catch {
+    return { detail: text }
+  }
+}
+
+function buildAuthError(response, payload, fallbackMessage) {
+  if (payload?.detail) return payload.detail
+  if (response.status === 502 || response.status === 503 || response.status === 504) {
+    return 'Backend unreachable. Start the API on http://127.0.0.1:8000 and retry.'
+  }
+  if (response.status >= 500) {
+    return 'Server error. Check the backend logs and retry.'
+  }
+  return fallbackMessage
+}
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null)
@@ -11,10 +33,13 @@ export function AuthProvider({ children }) {
   useEffect(() => {
     if (!token) { setLoading(false); return }
     fetch('/api/auth/me', { headers: { Authorization: `Bearer ${token}` } })
-      .then(r => r.ok ? r.json() : null)
-      .then(u => { setUser(u); setLoading(false) })
+      .then(async (response) => {
+        const payload = await readResponsePayload(response)
+        return response.ok ? payload : null
+      })
+      .then((u) => { setUser(u); setLoading(false) })
       .catch(() => { setLoading(false) })
-  }, [])
+  }, [token])
 
   function authFetch(url, opts = {}) {
     return fetch(url, {
@@ -24,16 +49,25 @@ export function AuthProvider({ children }) {
   }
 
   async function login(email, password) {
-    const r = await fetch('/api/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password }),
-    })
-    if (!r.ok) {
-      const e = await r.json()
-      throw new Error(e.detail || 'Login failed')
+    let response
+    try {
+      response = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      })
+    } catch {
+      throw new Error('Unable to reach the backend. Start the API on http://127.0.0.1:8000.')
     }
-    const data = await r.json()
+
+    const data = await readResponsePayload(response)
+    if (!response.ok) {
+      throw new Error(buildAuthError(response, data, 'Login failed'))
+    }
+    if (!data?.token || !data?.user) {
+      throw new Error('Unexpected server response during login.')
+    }
+
     localStorage.setItem('ts_token', data.token)
     setToken(data.token)
     setUser(data.user)
@@ -41,16 +75,25 @@ export function AuthProvider({ children }) {
   }
 
   async function register(email, password, name) {
-    const r = await fetch('/api/auth/register', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password, name }),
-    })
-    if (!r.ok) {
-      const e = await r.json()
-      throw new Error(e.detail || 'Registration failed')
+    let response
+    try {
+      response = await fetch('/api/auth/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password, name }),
+      })
+    } catch {
+      throw new Error('Unable to reach the backend. Start the API on http://127.0.0.1:8000.')
     }
-    const data = await r.json()
+
+    const data = await readResponsePayload(response)
+    if (!response.ok) {
+      throw new Error(buildAuthError(response, data, 'Registration failed'))
+    }
+    if (!data?.token || !data?.user) {
+      throw new Error('Unexpected server response during registration.')
+    }
+
     localStorage.setItem('ts_token', data.token)
     setToken(data.token)
     setUser(data.user)

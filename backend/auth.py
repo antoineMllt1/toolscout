@@ -1,6 +1,6 @@
 """
 JWT authentication utilities.
-- Passwords hashed with bcrypt (passlib)
+- Passwords hashed with bcrypt
 - Tokens: HS256 JWT, 30-day expiry
 - Secret key auto-generated and persisted in SECRET_KEY file
 """
@@ -8,11 +8,8 @@ import os
 import secrets
 from datetime import datetime, timedelta
 
-import warnings
-warnings.filterwarnings("ignore", ".*error reading bcrypt version.*")
-
+import bcrypt
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 
 ALGORITHM  = "HS256"
 TOKEN_DAYS = 30
@@ -30,15 +27,18 @@ def _load_secret() -> str:
 
 SECRET_KEY = os.environ.get("SECRET_KEY") or _load_secret()
 
-pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-
 def hash_password(password: str) -> str:
-    return pwd_ctx.hash(password)
+    password_bytes = password.encode("utf-8")
+    if len(password_bytes) > 72:
+        raise ValueError("Password must be 72 bytes or fewer")
+    return bcrypt.hashpw(password_bytes, bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_ctx.verify(plain, hashed)
+    try:
+        return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+    except ValueError:
+        return False
 
 
 def create_token(user_id: int, email: str) -> str:

@@ -1,4 +1,5 @@
 import { useDeferredValue, useEffect, useMemo, useState } from 'react'
+import AppPageHeader from '../components/AppPageHeader'
 import FilterBar from '../components/FilterBar'
 import JobCard from '../components/JobCard'
 import { useApplications } from '../context/ApplicationContext'
@@ -20,7 +21,8 @@ function buildOptionList(results, getter) {
     const item = getter(result)
     if (!item?.key && !item?.value) return
     const value = item.key || item.value
-    const label = item.label || item.value || item.key
+    const label = (item.label || item.value || item.key || '').trim()
+    if (!value || !label) return
     counts.set(value, { value, label, count: (counts.get(value)?.count || 0) + 1 })
   })
   return [...counts.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label))
@@ -45,32 +47,61 @@ function formatSnippet(snippet) {
     .trim()
 }
 
-function SearchDetailPane({ result, onNavigate, user, isFavorite, onToggleFavorite, onWatchCompany }) {
+const IconSparkle = () => (
+  <svg viewBox="0 0 20 20" fill="currentColor" width="16" height="16">
+    <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 0 0 .95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 0 0-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 0 0-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 0 0-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 0 0 .951-.69l1.07-3.292z" />
+  </svg>
+)
+
+const IconExternal = () => (
+  <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" width="13" height="13">
+    <path d="M11 3h6v6M17 3l-8 8M9 5H4a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1v-5" />
+  </svg>
+)
+
+function SearchDetailPane({ result, onNavigate, onGenerateCv, user, isFavorite, onToggleFavorite }) {
   if (!result) {
     return (
       <aside className="detail-pane empty">
-        <p className="eyebrow">Overview</p>
-        <h3 className="detail-title">Selectionne une annonce</h3>
-        <p>Chaque carte ouvre ici un resume rapide avant de partir sur le site source.</p>
+        <p className="eyebrow">Aperçu</p>
+        <h3 className="detail-title">Sélectionne une annonce</h3>
+        <p>Clique sur une carte pour voir le détail et générer ton CV.</p>
       </aside>
     )
   }
 
   const normalized = result.normalized || {}
-  const sourceLabel = SOURCE_META[normalized.source?.key]?.label || normalized.source?.label || result.source
+  const sourceKey = normalized.source?.key || result.source
+  const sourceLabel = SOURCE_META[sourceKey]?.label || result.source
 
   return (
     <aside className="detail-pane">
       <div className="detail-pane-head">
         <div className="detail-pane-copy">
-          <p className="eyebrow">{sourceLabel}</p>
+          {sourceLabel && <p className="eyebrow">{sourceLabel}</p>}
           <h3 className="detail-title">{result.job_title}</h3>
-          <p className="detail-company">{result.company_name || 'Entreprise non precisee'}</p>
+          <p className="detail-company">{result.company_name || 'Entreprise non précisée'}</p>
         </div>
+
+        {/* PRIMARY CTA — Generate CV */}
+        {user ? (
+          <button className="cv-generate-button" onClick={() => onGenerateCv(result)}>
+            <IconSparkle />
+            Générer mon CV pour ce poste
+          </button>
+        ) : (
+          <button className="cv-generate-button" onClick={() => onNavigate('auth')}>
+            <IconSparkle />
+            Connecte-toi pour générer ton CV
+          </button>
+        )}
+
         <button
-          className="primary-button detail-cta"
+          className="secondary-button"
+          style={{ width: '100%', justifyContent: 'center' }}
           onClick={() => window.open(result.job_url, '_blank', 'noopener,noreferrer')}
         >
+          <IconExternal />
           Voir l'annonce source
         </button>
       </div>
@@ -78,57 +109,46 @@ function SearchDetailPane({ result, onNavigate, user, isFavorite, onToggleFavori
       <div className="detail-metadata-grid">
         <div>
           <span>Contrat</span>
-          <strong>{normalized.contract?.label || result.contract_type || 'Non precise'}</strong>
+          <strong>{normalized.contract?.label || result.contract_type || 'Non précisé'}</strong>
         </div>
         <div>
           <span>Mode</span>
-          <strong>{normalized.remote_mode?.label || 'A verifier'}</strong>
+          <strong>{normalized.remote_mode?.label || 'À vérifier'}</strong>
         </div>
         <div>
           <span>Niveau</span>
-          <strong>{normalized.seniority?.label || 'Non precise'}</strong>
+          <strong>{normalized.seniority?.label || 'Non précisé'}</strong>
         </div>
         <div>
           <span>Ville</span>
-          <strong>{normalized.location?.label || result.location || 'Non precisee'}</strong>
+          <strong>{normalized.location?.label || result.location || 'Non précisée'}</strong>
         </div>
       </div>
 
-      <section className="detail-section">
-        <header>
-          <h4>Extraits ou l'outil est cite</h4>
-          <small>Normalises pour filtrer plus vite</small>
-        </header>
-        <div className="detail-quote-list">
-          {(result.tool_context || []).map((snippet, index) => (
-            <blockquote key={`${result.id}-${index}`}>{formatSnippet(snippet)}</blockquote>
-          ))}
-        </div>
-      </section>
+      {(result.tool_context || []).length > 0 && (
+        <section className="detail-section">
+          <header>
+            <h4>Extraits clés</h4>
+            <small>Où l'outil est cité</small>
+          </header>
+          <div className="detail-quote-list">
+            {result.tool_context.map((snippet, index) => (
+              <blockquote key={`${result.id}-${index}`}>{formatSnippet(snippet)}</blockquote>
+            ))}
+          </div>
+        </section>
+      )}
 
       <section className="detail-section">
-        <header>
-          <h4>Prochaines actions</h4>
-        </header>
+        <header><h4>Actions</h4></header>
         <div className="detail-action-stack">
-          {user ? (
+          {user && (
             <button className="secondary-button" onClick={() => onToggleFavorite(result)}>
-              {isFavorite ? 'Retirer des favoris' : 'Ajouter aux favoris'}
+              {isFavorite ? '♥ Retirer des favoris' : "♡ Sauvegarder l'offre"}
             </button>
-          ) : null}
+          )}
           <button className="secondary-button" onClick={() => onNavigate('dashboard')}>
             Classer dans mes candidatures
-          </button>
-          <button className="secondary-button" onClick={() => onNavigate('cv')}>
-            Ouvrir le profil candidat
-          </button>
-          {user ? (
-            <button className="secondary-button" onClick={() => onWatchCompany(result)}>
-              Suivre la societe
-            </button>
-          ) : null}
-          <button className="secondary-button" onClick={() => onNavigate('ops')}>
-            Ouvrir career ops
           </button>
         </div>
       </section>
@@ -136,8 +156,8 @@ function SearchDetailPane({ result, onNavigate, user, isFavorite, onToggleFavori
   )
 }
 
-export default function SearchPage({ onNavigate }) {
-  const { user, authFetch } = useAuth()
+export default function SearchPage({ onNavigate, onGenerateCv }) {
+  const { user } = useAuth()
   const { byJobUrl: favoriteByUrl, toggleJobFavorite } = useFavorites()
   const {
     tool,
@@ -235,53 +255,38 @@ export default function SearchPage({ onNavigate }) {
     setActionFeedback(existing ? 'Annonce retiree des favoris.' : 'Annonce ajoutee aux favoris.')
   }
 
-  async function handleWatchCompany(result) {
-    if (!user) {
-      onNavigate('auth')
-      return
-    }
-    const companyName = result.company_name || 'Company to watch'
-    const response = await authFetch('/api/company-portals', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        company_name: companyName,
-        careers_url: result.job_url,
-        active: true,
-        favorite: true,
-        cadence: 'weekly',
-        notes: `Ajoute depuis une annonce: ${result.job_title || ''}`.trim(),
-      }),
-    })
-    if (!response.ok) {
-      setActionFeedback('Impossible de creer la veille societe.')
-      return
-    }
-    setActionFeedback(`${companyName} ajoutee a la veille societe.`)
-  }
-
   return (
     <main className="workspace-page">
+      <AppPageHeader
+        eyebrow="Recherche d'offres"
+        title={tool ? `Recherche: ${tool}` : 'Recherche de postes'}
+        description={statusCopy}
+        actions={
+          <>
+            <button className="primary-button" type="button" onClick={() => startSearch(draftTool)} disabled={!draftTool.trim() || isRunning}>
+              {isRunning ? 'Scraping en cours' : 'Lancer la recherche'}
+            </button>
+            <button className="secondary-button" type="button" onClick={clearSearch}>
+              Reinitialiser
+            </button>
+          </>
+        }
+        stats={[
+          { label: 'Run', value: tool || 'Nouveau', tone: 'tone-blue' },
+          { label: 'Statut', value: isRunning ? 'En cours' : status === 'completed' ? 'Termine' : 'Pret', tone: 'tone-green' },
+          { label: 'Resultats visibles', value: filteredResults.length, tone: 'tone-yellow' },
+          { label: 'Sources terminees', value: `${sourcesDone.length}/4` },
+        ]}
+      />
+
       <section className="search-dashboard-hero">
-        <div className="command-center-card">
-          <div className="command-center-head">
-            <div className="command-center-copy">
-              <p className="eyebrow is-light">Recherche d'offres</p>
-              <h1 style={{ fontSize: '1.5rem', fontWeight: 800, color: '#fff', letterSpacing: '-0.03em', margin: '0 0 6px' }}>
-                Lance une recherche
-              </h1>
-              <p className="lede is-light">{statusCopy}</p>
+        <div className="panel-shell search-command-shell fade-stagger" style={{ '--index': 1 }}>
+          <div className="panel-head">
+            <div>
+              <p className="eyebrow">Commande</p>
+              <h2>Lancer un run</h2>
             </div>
-            <div className="command-center-kpis">
-              <div className="mini-metric">
-                <span>Run</span>
-                <strong>{tool || 'Nouveau'}</strong>
-              </div>
-              <div className="mini-metric">
-                <span>Statut</span>
-                <strong>{isRunning ? 'En cours' : status === 'completed' ? 'Termine' : 'Pret'}</strong>
-              </div>
-            </div>
+            <p className="panel-note">Choisis un outil, lance le scraping, puis affine les cartes avec les filtres.</p>
           </div>
 
           <form
@@ -291,7 +296,7 @@ export default function SearchPage({ onNavigate }) {
               startSearch(draftTool)
             }}
           >
-            <label className="field-stack grow dark">
+            <label className="field-stack grow">
               <span>Outil a detecter dans les annonces</span>
               <input
                 value={draftTool}
@@ -299,20 +304,20 @@ export default function SearchPage({ onNavigate }) {
                 placeholder="Power BI, Make, HubSpot, dbt"
               />
             </label>
-            <button className="primary-button light" type="submit" disabled={!draftTool.trim() || isRunning}>
+            <button className="primary-button" type="submit" disabled={!draftTool.trim() || isRunning}>
               {isRunning ? 'Scraping en cours' : 'Lancer la recherche'}
             </button>
-            <button className="secondary-button dark" type="button" onClick={clearSearch}>
+            <button className="secondary-button" type="button" onClick={clearSearch}>
               Reinitialiser
             </button>
           </form>
 
-          <div className="popular-strip dark">
+          <div className="popular-strip">
             {POPULAR_TOOLS.map((item) => (
               <button
                 key={item}
                 type="button"
-                className="filter-chip dark"
+                className="filter-chip"
                 onClick={() => {
                   setDraftTool(item)
                   startSearch(item)
@@ -326,10 +331,6 @@ export default function SearchPage({ onNavigate }) {
 
         <div className="search-overview-stack">
           <div className="overview-grid">
-            <div className="overview-card tone-blue">
-              <span>Resultats visibles</span>
-              <strong>{filteredResults.length}</strong>
-            </div>
             <div className="overview-card tone-green">
               <span>Sources terminees</span>
               <strong>{sourcesDone.length}/4</strong>
@@ -427,10 +428,10 @@ export default function SearchPage({ onNavigate }) {
         <SearchDetailPane
           result={displayedSelectedResult}
           onNavigate={onNavigate}
+          onGenerateCv={onGenerateCv}
           user={user}
           isFavorite={Boolean(displayedSelectedResult && favoriteByUrl[displayedSelectedResult.job_url])}
           onToggleFavorite={handleToggleFavorite}
-          onWatchCompany={handleWatchCompany}
         />
       </section>
     </main>

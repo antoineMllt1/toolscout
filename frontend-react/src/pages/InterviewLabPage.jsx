@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import AppPageHeader from '../components/AppPageHeader'
 import { useAuth } from '../context/AuthContext'
 
 const STORAGE_KEY = 'stageai_interview_lab_v1'
@@ -221,53 +222,28 @@ export default function InterviewLabPage({ onNavigate }) {
 
   return (
     <main className="interview-page">
-      <section className="interview-hero-grid">
-        <article className="hero-slab dark fade-stagger" style={{ '--index': 0 }}>
-          <div className="hero-copy">
-            <p className="eyebrow is-light">Interview lab</p>
-            <h1 className="dashboard-display">Entraîne tes réponses avant que l’entretien décide pour toi.</h1>
-            <p className="lede is-light">
-              Les questions viennent de ton profil, de tes rôles cibles et de tes projets. Tu peux rédiger,
-              te noter et itérer jusqu’à avoir des réponses plus nettes.
-            </p>
-          </div>
-
-          <div className="hero-action-row">
-            <button className="primary-button light" onClick={chooseRandom}>
-              Question aléatoire
+      <AppPageHeader
+        eyebrow="Interview lab"
+        title="Entrainement entretien"
+        description={
+          profile?.candidate_brief?.summary || 'Travaille tes reponses avec des questions liees a ton profil, tes roles cibles et tes projets.'
+        }
+        actions={
+          <>
+            <button className="primary-button" onClick={chooseRandom}>
+              Question aleatoire
             </button>
-            <button className="secondary-button dark" onClick={() => onNavigate('cv')}>
+            <button className="secondary-button" onClick={() => onNavigate('cv')}>
               Retour au profil
             </button>
-          </div>
-
-          <div className="hero-stat-strip">
-            <div className="hero-stat-chip">
-              <span>Questions</span>
-              <strong>{allQuestions.length}</strong>
-            </div>
-            <div className="hero-stat-chip">
-              <span>Pratiquées</span>
-              <strong>{practicedCount}</strong>
-            </div>
-            <div className="hero-stat-chip">
-              <span>Progression</span>
-              <strong>{completionRate}%</strong>
-            </div>
-          </div>
-        </article>
-
-        <aside className="hero-rail">
-          <article className="rail-panel fade-stagger" style={{ '--index': 1 }}>
-            <p className="eyebrow">Focus roles</p>
-            <h2>{(profile?.student_guidance?.role_tracks || []).join(' / ') || 'Roles à préciser'}</h2>
-            <p>{profile?.candidate_brief?.summary || 'Complète ton profil pour rendre les drills plus spécifiques.'}</p>
-            <button className="text-action" onClick={() => onNavigate('cv')}>
-              Renforcer mon profil
-            </button>
-          </article>
-        </aside>
-      </section>
+          </>
+        }
+        stats={[
+          { label: 'Questions', value: allQuestions.length, tone: 'tone-blue' },
+          { label: 'Pratiquees', value: practicedCount, tone: 'tone-green' },
+          { label: 'Progression', value: `${completionRate}%`, tone: 'tone-yellow' },
+        ]}
+      />
 
       <section className="interview-layout">
         <aside className="interview-queue panel-shell fade-stagger" style={{ '--index': 2 }}>

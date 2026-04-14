@@ -1,97 +1,53 @@
-import { startTransition, useEffect, useState } from 'react'
+import { startTransition, useState } from 'react'
 import { AuthProvider, useAuth } from './context/AuthContext'
-import { ApplicationProvider } from './context/ApplicationContext'
+import { SearchProvider } from './context/SearchContext'
 import { FavoritesProvider } from './context/FavoritesContext'
-import { SearchProvider, useSearch } from './context/SearchContext'
-import SearchPage from './pages/SearchPage'
-import DashboardPage from './pages/DashboardPage'
+import { ApplicationProvider } from './context/ApplicationContext'
+import Layout from './components/Layout'
 import AuthPage from './pages/AuthPage'
+import SearchPage from './pages/SearchPage'
 import CvStudioPage from './pages/CvStudioPage'
-import FavoritesPage from './pages/FavoritesPage'
-import HistoryPage from './pages/HistoryPage'
-import InterviewLabPage from './pages/InterviewLabPage'
-import CareerOpsPage from './pages/CareerOpsPage'
-import HomePage from './pages/HomePage'
+import CandidaturesPage from './pages/CandidaturesPage'
 import ProfilePage from './pages/ProfilePage'
-import Navbar from './components/Navbar'
-import AppTopbar from './components/AppTopbar'
 import './index.css'
 
-const PAGE_STORAGE_KEY = 'sh_active_page_v1'
-
 function AppInner() {
-  const { loading, user } = useAuth()
-  const { openSearch } = useSearch()
-  const [page, setPage] = useState(() => localStorage.getItem(PAGE_STORAGE_KEY) || 'search')
+  const { user, loading } = useAuth()
+  const [page, setPage] = useState(() => localStorage.getItem('sh_page') || 'search')
   const [pendingJob, setPendingJob] = useState(null)
 
-  useEffect(() => {
-    localStorage.setItem(PAGE_STORAGE_KEY, page)
-  }, [page])
-
-  useEffect(() => {
-    const stored = localStorage.getItem(PAGE_STORAGE_KEY)
-    if (!stored) {
-      setPage(user ? 'home' : 'search')
-    }
-  }, [user])
-
-  const navigate = (nextPage) => {
+  function navigate(nextPage) {
     startTransition(() => {
       setPage(nextPage)
+      localStorage.setItem('sh_page', nextPage)
     })
   }
 
-  const restoreSearchFromHistory = (searchId) => {
-    openSearch(searchId)
-    startTransition(() => {
-      setPage('search')
-    })
-  }
-
-  // Navigate to CV Studio with a pre-selected job
-  const generateCvForJob = (job) => {
+  function generateCvForJob(job) {
     setPendingJob(job)
-    startTransition(() => {
-      setPage('cv')
-    })
+    navigate('cv')
   }
 
-  if (loading) {
-    return (
-      <div className="app-loading-shell">
-        <div className="app-loading-mark" />
-        <p style={{ color: 'var(--muted)', fontSize: '13px' }}>Chargement…</p>
-      </div>
-    )
-  }
+  if (loading) return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', background: 'var(--bg)' }}>
+      <div className="spinner spinner--lg" />
+    </div>
+  )
 
-  if (page === 'auth') {
-    return <AuthPage onSuccess={() => navigate('home')} />
-  }
+  if (!user) return <AuthPage />
 
   return (
-    <div className="app-layout">
-      <Navbar page={page} onNavigate={navigate} />
-      <div className="app-content">
-        {page !== 'auth' && <AppTopbar page={page} onNavigate={navigate} />}
-        {page === 'home' && <HomePage onNavigate={navigate} />}
-        {page === 'search' && (
-          <SearchPage onNavigate={navigate} onGenerateCv={generateCvForJob} />
-        )}
-        {page === 'favorites' && (
-          <FavoritesPage onNavigate={navigate} onGenerateCv={generateCvForJob} />
-        )}
-        {page === 'dashboard' && <DashboardPage onNavigate={navigate} />}
-        {page === 'history' && <HistoryPage onOpen={restoreSearchFromHistory} />}
-        {page === 'cv' && (
-          <CvStudioPage onNavigate={navigate} pendingJob={pendingJob} onClearPendingJob={() => setPendingJob(null)} />
-        )}
-        {page === 'interview' && <InterviewLabPage onNavigate={navigate} />}
-        {page === 'ops' && <CareerOpsPage onNavigate={navigate} />}
-        {page === 'profile' && <ProfilePage onNavigate={navigate} />}
-      </div>
-    </div>
+    <Layout page={page} onNavigate={navigate}>
+      {page === 'search' && <SearchPage onGenerateCv={generateCvForJob} />}
+      {page === 'cv' && (
+        <CvStudioPage
+          pendingJob={pendingJob}
+          onClearPendingJob={() => setPendingJob(null)}
+        />
+      )}
+      {page === 'candidatures' && <CandidaturesPage />}
+      {page === 'profile' && <ProfilePage />}
+    </Layout>
   )
 }
 

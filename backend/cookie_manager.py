@@ -3,8 +3,8 @@ Automatic Cloudflare cookie harvester and persistent store.
 
 Strategy:
   - On startup: load cookies from DB.
-  - Every REFRESH_INTERVAL seconds: open a fresh Playwright session per source,
-    let it resolve the challenge, extract cookies, and persist them.
+  - If any source has stale (> COOKIE_TTL_HOURS) or missing cookies, harvest immediately.
+  - Every REFRESH_INTERVAL seconds: refresh all sources.
   - Scrapers always read from the in-memory COOKIES dict shared with main.py.
 """
 import asyncio
@@ -18,15 +18,15 @@ from database import DB_PATH
 
 log = logging.getLogger("toolscout.cookies")
 
-REFRESH_INTERVAL = 6 * 3600
-COOKIE_TTL_HOURS = 12
+REFRESH_INTERVAL = 2 * 3600   # re-harvest every 2 hours
+COOKIE_TTL_HOURS = 10          # warn + re-harvest immediately if older than this
 
 HARVEST_TARGETS = {
     "indeed": {
         "url": "https://fr.indeed.com/emplois?q=test",
         "domain": ".indeed.com",
         "wait": "networkidle",
-        "extra_wait": 3000,
+        "extra_wait": 4000,
     },
     "jobteaser": {
         "url": "https://www.jobteaser.com/fr/job-offers?query=test",
@@ -41,6 +41,9 @@ UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
+
+# In-memory mapping: source -> harvested_at (datetime)
+_cookie_ages: dict[str, datetime] = {}
 
 
 async def ensure_cookies_table():
@@ -68,13 +71,16 @@ async def load_cookies_from_db() -> dict[str, dict]:
 
     for row in rows:
         try:
-            age_hours = (
-                datetime.utcnow() - datetime.fromisoformat(row["harvested_at"])
-            ).total_seconds() / 3600
+            harvested_at = datetime.fromisoformat(row["harvested_at"])
+            age_hours = (datetime.utcnow() - harvested_at).total_seconds() / 3600
             cookies = json.loads(row["cookies_json"])
             result[row["source"]] = cookies
+            _cookie_ages[row["source"]] = harvested_at
             if age_hours > COOKIE_TTL_HOURS:
-                log.warning("%s cookies are %.0fh old; refresh recommended", row["source"], age_hours)
+                log.warning(
+                    "%s cookies are %.0fh old (threshold %sh) — will re-harvest now",
+                    row["source"], age_hours, COOKIE_TTL_HOURS,
+                )
             else:
                 log.info("Loaded %s cookies (%.1fh old)", row["source"], age_hours)
         except Exception as e:
@@ -85,6 +91,7 @@ async def load_cookies_from_db() -> dict[str, dict]:
 
 async def save_cookies_to_db(source: str, cookies: dict):
     await ensure_cookies_table()
+    now = datetime.utcnow()
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             """
@@ -94,11 +101,17 @@ async def save_cookies_to_db(source: str, cookies: dict):
                 cookies_json = excluded.cookies_json,
                 harvested_at = excluded.harvested_at
             """,
-            (source, json.dumps(cookies), datetime.utcnow().isoformat()),
+            (source, json.dumps(cookies), now.isoformat()),
         )
         await db.commit()
-
+    _cookie_ages[source] = now
     log.info("Saved %s cookies to DB keys=%s", source, list(cookies.keys()))
+
+
+def _cookie_age_hours(source: str) -> float:
+    if source not in _cookie_ages:
+        return float("inf")
+    return (datetime.utcnow() - _cookie_ages[source]).total_seconds() / 3600
 
 
 def _harvest_sync(source: str) -> dict:
@@ -137,10 +150,21 @@ def _harvest_sync(source: str) -> dict:
             ctx.add_init_script(
                 """
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                window.chrome = { runtime: {} };
+                Object.defineProperty(navigator, 'languages', { get: () => ['fr-FR', 'fr', 'en-US'] });
+                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
                 """
             )
 
             page = ctx.new_page()
+            # block heavy resources to speed up harvest
+            page.route(
+                "**/*",
+                lambda route: route.abort()
+                if route.request.resource_type in {"image", "media", "font"}
+                else route.continue_(),
+            )
+
             try:
                 page.goto(target["url"], wait_until=target["wait"], timeout=40000)
             except Exception:
@@ -159,7 +183,7 @@ def _harvest_sync(source: str) -> dict:
     if cookies:
         log.info("Harvested %s cookies keys=%s", source, list(cookies.keys()))
     else:
-        log.warning("No cookies harvested for %s", source)
+        log.warning("No cookies harvested for %s — site may still be blocking headless", source)
 
     return cookies
 
@@ -175,16 +199,23 @@ async def harvest_source(source: str, live_store: dict) -> bool:
 
 
 async def cookie_refresh_loop(live_store: dict):
+    """
+    On startup: harvest any source that is missing OR whose cookies are older than COOKIE_TTL_HOURS.
+    Then re-harvest all sources every REFRESH_INTERVAL seconds.
+    """
     for source in HARVEST_TARGETS:
-        if source not in live_store:
-            log.info("%s not in store; harvesting now", source)
+        age = _cookie_age_hours(source)
+        if source not in live_store or age > COOKIE_TTL_HOURS:
+            reason = "missing" if source not in live_store else f"{age:.0f}h old (stale)"
+            log.info("%s cookies %s — harvesting now", source, reason)
             await harvest_source(source, live_store)
+            await asyncio.sleep(5)
         else:
-            log.info("%s already in store; skipping initial harvest", source)
+            log.info("%s cookies are fresh (%.1fh old) — skipping initial harvest", source, age)
 
     while True:
         await asyncio.sleep(REFRESH_INTERVAL)
-        log.info("Starting scheduled cookie refresh")
+        log.info("Starting scheduled cookie refresh (every %dh)", REFRESH_INTERVAL // 3600)
         for source in HARVEST_TARGETS:
             await harvest_source(source, live_store)
             await asyncio.sleep(5)

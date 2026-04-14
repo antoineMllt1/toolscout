@@ -22,9 +22,9 @@ INDEED_UA = (
 class IndeedScraper(BaseScraper):
     SOURCE = "indeed"
     DELAY = 0.35
-    MAX_PAGES = 1
-    MAX_SCANNED_CARDS = 4
-    MAX_DURATION = 15
+    MAX_PAGES = 5
+    MAX_SCANNED_CARDS = 20
+    MAX_DURATION = 45
     SEARCH_TIMEOUT_MS = 12000
     DETAIL_TIMEOUT_MS = 7000
 
@@ -118,7 +118,7 @@ class IndeedScraper(BaseScraper):
                         continue
                     seen_jk.add(jk)
 
-                    snippet_context = self.extract_tool_context(card.get("snippet", ""), tool)
+                    snippet_context = self.extract_search_context(card.get("snippet", ""), tool, card.get("title", ""))
                     if snippet_context:
                         yield JobResult(
                             company_name=card.get("company", ""),
@@ -142,7 +142,7 @@ class IndeedScraper(BaseScraper):
                     if not description:
                         continue
 
-                    context = self.extract_tool_context(description, tool)
+                    context = self.extract_search_context(description, tool, card.get("title", ""))
                     if not context:
                         continue
 
@@ -205,6 +205,15 @@ class IndeedScraper(BaseScraper):
             except Exception:
                 pass
 
+    def _is_blocked(self, html: str) -> bool:
+        lower = html.lower()
+        return (
+            "blocked - indeed" in lower
+            or "security check" in lower
+            or "just a moment" in lower
+            or "cf-browser-verification" in lower
+        )
+
     def _load_results_page(self, page, url: str) -> bool:
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=self.SEARCH_TIMEOUT_MS)
@@ -212,17 +221,21 @@ class IndeedScraper(BaseScraper):
             self.log.warning("Indeed navigation failed for %s: %s", url, e)
             return False
 
-        for _ in range(4):
-            page.wait_for_timeout(1200)
+        for attempt in range(6):
+            page.wait_for_timeout(1500)
             html = page.content()
-            if "blocked - indeed" in html.lower() or "security check" in html.lower():
+            if self._is_blocked(html):
+                self.log.debug("Indeed: Cloudflare challenge detected (attempt %d/6)", attempt + 1)
                 continue
             if page.query_selector(self._CARD_SELECTORS):
                 return True
 
         html = page.content()
-        if "blocked - indeed" in html.lower() or "security check" in html.lower():
-            self.log.warning("Indeed still blocked by Cloudflare for %s", url)
+        if self._is_blocked(html):
+            self.log.warning(
+                "Indeed still blocked by Cloudflare for %s — cookies may be stale", url
+            )
+            return False
         return bool(page.query_selector(self._CARD_SELECTORS))
 
     def _parse_cards(self, html: str) -> list[dict]:

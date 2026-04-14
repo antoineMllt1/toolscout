@@ -1,4 +1,5 @@
-import { createContext, useContext, useEffect, useMemo, useState } from 'react'
+/* eslint-disable react-refresh/only-export-components */
+import { createContext, useContext, useEffect, useState } from 'react'
 import { useAuth } from './AuthContext'
 
 const FavoritesContext = createContext(null)
@@ -24,14 +25,6 @@ export function FavoritesProvider({ children }) {
   const { user, authFetch } = useAuth()
   const [favorites, setFavorites] = useState([])
 
-  useEffect(() => {
-    if (!user) {
-      setFavorites([])
-      return
-    }
-    void loadFavorites()
-  }, [user])
-
   async function loadFavorites() {
     try {
       const response = await authFetch('/api/favorites/jobs')
@@ -41,6 +34,15 @@ export function FavoritesProvider({ children }) {
       console.error(error)
     }
   }
+
+  useEffect(() => {
+    if (!user) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setFavorites([])
+      return
+    }
+    void loadFavorites()
+  }, [user])
 
   async function saveFavorite(job, overrides = {}) {
     const payload = buildPayload(job, overrides)
@@ -111,12 +113,9 @@ export function FavoritesProvider({ children }) {
     return saveFavorite(job, overrides)
   }
 
-  const byJobUrl = useMemo(
-    () => Object.fromEntries(favorites.map((item) => [item.job_url, item])),
-    [favorites],
-  )
+  const byJobUrl = Object.fromEntries(favorites.map((item) => [item.job_url, item]))
 
-  const value = useMemo(() => ({
+  const value = {
     favorites,
     byJobUrl,
     loadFavorites,
@@ -124,7 +123,7 @@ export function FavoritesProvider({ children }) {
     updateFavorite,
     removeFavorite,
     toggleJobFavorite,
-  }), [favorites, byJobUrl, loadFavorites, saveFavorite, updateFavorite, removeFavorite, toggleJobFavorite])
+  }
 
   return <FavoritesContext.Provider value={value}>{children}</FavoritesContext.Provider>
 }

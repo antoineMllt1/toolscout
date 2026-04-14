@@ -9,10 +9,12 @@ from io import BytesIO
 from time import perf_counter
 from typing import AsyncIterator, Optional
 
-# Fix Playwright sync_api in asyncio thread pool on Windows:
-# SelectorEventLoop (used in threads) doesn't support subprocess on Windows.
+# Use SelectorEventLoop on Windows to avoid Python 3.13 ProactorEventLoop bug
+# (AssertionError in _start_serving when connections arrive near shutdown).
+# Playwright and PDF generation use subprocess.run() (synchronous, thread-pool),
+# which works fine with SelectorEventLoop — only asyncio.create_subprocess_* needs Proactor.
 if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 import aiosqlite
 import requests
@@ -30,21 +32,30 @@ load_dotenv()
 from database import init_db, get_db, DB_PATH
 from models import SearchCreate
 from anthropic_client import (
+    analyze_job_posting,
     AnthropicConfigError,
     AnthropicResponseError,
     extract_cv_profile_from_text,
     generate_cover_letter,
+    select_cv_evidence,
+    summarize_role_description,
     generate_cv_copy,
 )
 from auth import hash_password, verify_password, create_token, decode_token
 from cookie_manager import load_cookies_from_db, cookie_refresh_loop
 from cv_engine import (
+    apply_evidence_selection,
+    build_job_analysis_fallback,
+    build_copywriting_payload,
+    merge_job_analysis,
+    render_moderncv_latex,
     CV_TEMPLATE_LIBRARY,
     STRICT_COPY_RULES,
     build_target_snapshot,
     build_targeted_cv_draft,
     default_cv_profile,
     dumps_json,
+    sanitize_block,
     sanitize_cv_profile,
     sanitize_line,
     sanitize_string_list,
@@ -64,6 +75,7 @@ from career_ops_fit import (
 )
 from portfolio_ingest import (
     build_application_plan,
+    build_application_prep,
     PortfolioImportError,
     build_candidate_brief,
     build_interview_prep,
@@ -356,7 +368,19 @@ async def get_applications(current_user=Depends(get_current_user)):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
-            "SELECT * FROM applications WHERE user_id = ? ORDER BY updated_at DESC",
+            """SELECT applications.*,
+                      application_preps.id AS prep_id,
+                      application_preps.status AS prep_status,
+                      application_preps.updated_at AS prep_updated_at,
+                      cv_profiles.updated_at AS profile_updated_at
+               FROM applications
+               LEFT JOIN application_preps
+                 ON application_preps.application_id = applications.id
+                AND application_preps.user_id = applications.user_id
+               LEFT JOIN cv_profiles
+                 ON cv_profiles.user_id = applications.user_id
+               WHERE applications.user_id = ?
+               ORDER BY applications.updated_at DESC""",
             (current_user["id"],)
         )
         rows = await cur.fetchall()
@@ -454,6 +478,94 @@ async def application_stats(current_user=Depends(get_current_user)):
     return {r["status"]: r["count"] for r in rows}
 
 
+@app.get("/api/applications/{app_id}/prep")
+async def get_application_prep(app_id: int, current_user=Depends(get_current_user)):
+    application = await _load_application(current_user["id"], app_id)
+    prep_row = await _fetch_application_prep_row(current_user["id"], app_id)
+    if not prep_row:
+        raise HTTPException(404, "Application prep not found")
+
+    profile_row, user = await _fetch_cv_profile(current_user["id"])
+    profile = _parse_cv_profile_row(profile_row, user)
+    prep = _parse_application_prep_row(
+        prep_row,
+        profile_updated_at=profile.get("updated_at"),
+        application_updated_at=application.get("updated_at"),
+    )
+    prep["status"] = "stale" if prep["is_stale"] else prep["status"]
+    return {
+        "application": application,
+        "prep": prep,
+    }
+
+
+@app.post("/api/applications/{app_id}/prep/generate")
+async def generate_application_prep_endpoint(app_id: int, current_user=Depends(get_current_user)):
+    application = await _load_application(current_user["id"], app_id)
+    profile_row, user = await _fetch_cv_profile(current_user["id"])
+    profile = _parse_cv_profile_row(profile_row, user)
+    has_profile_data = any(
+        [
+            profile["summary"],
+            profile["skills"],
+            profile["experience"],
+            profile["projects"],
+            profile["education"],
+            profile["cv_text"],
+        ]
+    )
+    if not has_profile_data:
+        raise HTTPException(400, "Complete your CV profile before generating application prep")
+
+    try:
+        payload = build_application_prep(profile, application)
+        status = "ready"
+    except Exception as error:
+        fallback = {
+            "target_snapshot": build_target_snapshot("application", application),
+            "fit_summary": {"risk_flags": [sanitize_line(str(error), 180)]},
+            "selected_evidence": {},
+            "interview_questions": {},
+            "star_stories": [],
+            "portfolio_ideas": [],
+            "strengthening_actions": [],
+            "copy_notes": [sanitize_line(str(error), 180)],
+        }
+        prep_row = await _save_application_prep(
+            user_id=current_user["id"],
+            application_id=app_id,
+            profile_id=profile.get("id"),
+            payload=fallback,
+            status="failed",
+        )
+        prep = _parse_application_prep_row(
+            prep_row,
+            profile_updated_at=profile.get("updated_at"),
+            application_updated_at=application.get("updated_at"),
+        )
+        return {
+            "application": application,
+            "prep": prep,
+        }
+
+    prep_row = await _save_application_prep(
+        user_id=current_user["id"],
+        application_id=app_id,
+        profile_id=profile.get("id"),
+        payload=payload,
+        status=status,
+    )
+    prep = _parse_application_prep_row(
+        prep_row,
+        profile_updated_at=profile.get("updated_at"),
+        application_updated_at=application.get("updated_at"),
+    )
+    return {
+        "application": application,
+        "prep": prep,
+    }
+
+
 def _parse_app(r: dict) -> dict:
     try:
         r["tool_context"] = json.loads(r.get("tool_context") or "[]")
@@ -461,6 +573,13 @@ def _parse_app(r: dict) -> dict:
         r["tool_context"] = []
     r["status_label"] = tracker_status_label(r.get("status") or "")
     r["normalized"] = build_normalized_result(r)
+    prep_updated_at = r.get("prep_updated_at")
+    prep_status = r.get("prep_status") or ""
+    prep_is_stale = _is_prep_stale(prep_updated_at, r.get("updated_at"), r.get("profile_updated_at"))
+    r["has_prep"] = bool(r.get("prep_id"))
+    r["prep_status"] = "stale" if prep_is_stale and r.get("prep_id") else (prep_status or None)
+    r["prep_updated_at"] = prep_updated_at
+    r["prep_is_stale"] = prep_is_stale
     return r
 
 
@@ -643,6 +762,8 @@ def _parse_cv_profile_row(row: dict, user: dict | None = None) -> dict:
 
 
 def _parse_cv_draft_row(row: dict) -> dict:
+    target_snapshot = _json_value(row.get("target_snapshot_json"), {})
+    selected_payload = _json_value(row.get("selected_payload_json"), {})
     return {
         "id": row["id"],
         "profile_id": row.get("profile_id"),
@@ -652,8 +773,10 @@ def _parse_cv_draft_row(row: dict) -> dict:
         "target_title": row.get("target_title") or "",
         "target_company": row.get("target_company") or "",
         "target_job_url": row.get("target_job_url") or "",
-        "target_snapshot": _json_value(row.get("target_snapshot_json"), {}),
-        "selected_payload": _json_value(row.get("selected_payload_json"), {}),
+        "target_snapshot": target_snapshot,
+        "job_analysis": target_snapshot.get("job_analysis") or {},
+        "selected_payload": selected_payload,
+        "selection_plan": selected_payload.get("selection_plan") or {},
         "latex_source": row.get("latex_source") or "",
         "prompt_payload": _json_value(row.get("prompt_payload_json"), {}),
         "created_at": row.get("created_at"),
@@ -739,19 +862,33 @@ def _clean_cv_copy_suggestions(suggestions: dict, selected: dict) -> dict:
     allowed_experience_ids = {item.get("id") for item in selected.get("experience", [])}
     allowed_project_ids = {item.get("id") for item in selected.get("projects", [])}
     allowed_education_ids = {item.get("id") for item in selected.get("education", [])}
-    allowed_skills = set(selected.get("skills", []))
-
     cleaned = {
         "headline": str(suggestions.get("headline", "")).strip()[:160],
         "summary": str(suggestions.get("summary", "")).strip()[:1200],
         "skills_priority": [
-            skill
+            skill.strip()
             for skill in suggestions.get("skills_priority", [])
-            if isinstance(skill, str) and skill in allowed_skills
-        ][:10],
+            if isinstance(skill, str) and skill.strip()
+        ][:16],
         "experience_rewrites": [],
         "project_rewrites": [],
         "education_rewrites": [],
+        "composed_cv": {
+            "title": "",
+            "subtitle": "",
+            "profile": "",
+            "hard_skills": [],
+            "soft_skills": [],
+            "experience": [],
+            "projects": [],
+            "education": [],
+            "extra": [],
+        },
+        "design_notes": [
+            note.strip()[:220]
+            for note in suggestions.get("design_notes", [])
+            if isinstance(note, str) and note.strip()
+        ][:6],
         "compliance_notes": [
             note.strip()[:220]
             for note in suggestions.get("compliance_notes", [])
@@ -762,23 +899,189 @@ def _clean_cv_copy_suggestions(suggestions: dict, selected: dict) -> dict:
     for item in suggestions.get("experience_rewrites", []):
         if not isinstance(item, dict) or item.get("id") not in allowed_experience_ids:
             continue
-        bullets = [str(bullet).strip()[:220] for bullet in item.get("bullets", []) if str(bullet).strip()]
-        cleaned["experience_rewrites"].append({"id": item["id"], "bullets": bullets[:4]})
+        bullets = [str(bullet).strip()[:400] for bullet in item.get("bullets", []) if str(bullet).strip()]
+        cleaned["experience_rewrites"].append({"id": item["id"], "bullets": bullets[:5]})
 
     for item in suggestions.get("project_rewrites", []):
         if not isinstance(item, dict) or item.get("id") not in allowed_project_ids:
             continue
-        bullets = [str(bullet).strip()[:220] for bullet in item.get("bullets", []) if str(bullet).strip()]
+        bullets = [str(bullet).strip()[:400] for bullet in item.get("bullets", []) if str(bullet).strip()]
         cleaned["project_rewrites"].append({"id": item["id"], "bullets": bullets[:4]})
 
     for item in suggestions.get("education_rewrites", []):
         if not isinstance(item, dict) or item.get("id") not in allowed_education_ids:
             continue
-        bullet = str(item.get("bullet", "")).strip()[:220]
+        bullet = str(item.get("bullet", "")).strip()[:600]
         if bullet:
             cleaned["education_rewrites"].append({"id": item["id"], "bullet": bullet})
 
+    composed = suggestions.get("composed_cv")
+    if isinstance(composed, dict):
+        cleaned["composed_cv"] = {
+            "title": str(composed.get("title", "")).strip()[:140],
+            "subtitle": str(composed.get("subtitle", "")).strip()[:220],
+            "profile": str(composed.get("profile", "")).strip()[:1400],
+            "hard_skills": [
+                skill for skill in sanitize_string_list(composed.get("hard_skills"), max_items=10, max_length=60)
+                if skill in allowed_skills
+            ][:8],
+            "soft_skills": sanitize_string_list(composed.get("soft_skills"), max_items=6, max_length=60),
+            "experience": [],
+            "projects": [],
+            "education": [],
+            "extra": [],
+        }
+
+        for item in composed.get("experience", []):
+            if not isinstance(item, dict) or item.get("id") not in allowed_experience_ids:
+                continue
+            bullets = [str(bullet).strip()[:220] for bullet in item.get("bullets", []) if str(bullet).strip()]
+            cleaned["composed_cv"]["experience"].append(
+                {
+                    "id": item["id"],
+                    "title": str(item.get("title", "")).strip()[:180],
+                    "meta": str(item.get("meta", "")).strip()[:220],
+                    "bullets": bullets[:4],
+                }
+            )
+
+        for item in composed.get("projects", []):
+            if not isinstance(item, dict) or item.get("id") not in allowed_project_ids:
+                continue
+            bullets = [str(bullet).strip()[:220] for bullet in item.get("bullets", []) if str(bullet).strip()]
+            cleaned["composed_cv"]["projects"].append(
+                {
+                    "id": item["id"],
+                    "title": str(item.get("title", "")).strip()[:180],
+                    "meta": str(item.get("meta", "")).strip()[:220],
+                    "bullets": bullets[:4],
+                }
+            )
+
+        for item in composed.get("education", []):
+            if not isinstance(item, dict) or item.get("id") not in allowed_education_ids:
+                continue
+            bullet = str(item.get("bullet", "")).strip()[:220]
+            cleaned["composed_cv"]["education"].append(
+                {
+                    "id": item["id"],
+                    "title": str(item.get("title", "")).strip()[:180],
+                    "meta": str(item.get("meta", "")).strip()[:220],
+                    "bullet": bullet,
+                }
+            )
+
+        for item in composed.get("extra", []):
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title", "")).strip()[:120]
+            bullet = str(item.get("bullet", "")).strip()[:220]
+            if title or bullet:
+                cleaned["composed_cv"]["extra"].append({"title": title, "bullet": bullet})
+
     return cleaned
+
+
+def _build_cv_copy_fallback(draft: dict, error_message: str = "") -> dict:
+    selected = draft.get("selected_payload") or {}
+    target = selected.get("target") or {}
+    experience = selected.get("experience") or []
+    projects = selected.get("projects") or []
+    education = selected.get("education") or []
+    skills = selected.get("skills") or []
+
+    headline = sanitize_line(
+        target.get("job_title")
+        or draft.get("target_title")
+        or "Targeted CV",
+        160,
+    )
+    summary_bits = [
+        sanitize_line(target.get("job_title"), 120),
+        sanitize_line(target.get("company_name"), 120),
+        sanitize_line((target.get("job_analysis") or {}).get("candidate_angle"), 180),
+    ]
+    summary = ". ".join(bit for bit in summary_bits if bit)[:1200]
+
+    fallback = {
+        "headline": headline,
+        "summary": summary,
+        "skills_priority": skills[:8],
+        "experience_rewrites": [],
+        "project_rewrites": [],
+        "education_rewrites": [],
+        "composed_cv": {
+            "title": headline,
+            "subtitle": sanitize_line(target.get("company_name"), 180),
+            "profile": summary,
+            "hard_skills": skills[:6],
+            "soft_skills": [],
+            "experience": [],
+            "projects": [],
+            "education": [],
+            "extra": [],
+        },
+        "design_notes": [],
+        "compliance_notes": [],
+    }
+    if error_message:
+        fallback["compliance_notes"].append(sanitize_line(f"AI rewrite fallback used: {error_message}", 220))
+
+    for item in experience[:3]:
+        bullets = sanitize_string_list(
+            [item.get("summary", ""), *(item.get("highlights") or [])],
+            max_items=3,
+            max_length=220,
+        )
+        fallback["experience_rewrites"].append({"id": item.get("id"), "bullets": bullets})
+        fallback["composed_cv"]["experience"].append(
+            {
+                "id": item.get("id"),
+                "title": sanitize_line(item.get("title") or item.get("company"), 180),
+                "meta": " - ".join(
+                    value for value in [
+                        sanitize_line(item.get("company"), 120),
+                        sanitize_line(item.get("location"), 120),
+                        sanitize_line(item.get("start_date"), 40) and (
+                            f"{sanitize_line(item.get('start_date'), 40)} - {sanitize_line(item.get('end_date'), 40)}"
+                            if sanitize_line(item.get("end_date"), 40)
+                            else sanitize_line(item.get("start_date"), 40)
+                        ),
+                    ] if value
+                )[:220],
+                "bullets": bullets,
+            }
+        )
+
+    for item in projects[:3]:
+        bullets = sanitize_string_list(
+            [item.get("summary", ""), *(item.get("highlights") or [])],
+            max_items=2,
+            max_length=220,
+        )
+        fallback["project_rewrites"].append({"id": item.get("id"), "bullets": bullets})
+        fallback["composed_cv"]["projects"].append(
+            {
+                "id": item.get("id"),
+                "title": sanitize_line(item.get("name") or item.get("role"), 180),
+                "meta": sanitize_line(item.get("role"), 180),
+                "bullets": bullets,
+            }
+        )
+
+    for item in education[:2]:
+        bullet = sanitize_line(item.get("summary"), 220)
+        fallback["education_rewrites"].append({"id": item.get("id"), "bullet": bullet})
+        fallback["composed_cv"]["education"].append(
+            {
+                "id": item.get("id"),
+                "title": " - ".join(part for part in [sanitize_line(item.get("degree"), 120), sanitize_line(item.get("field"), 120)] if part) or sanitize_line(item.get("school"), 160),
+                "meta": " - ".join(value for value in [sanitize_line(item.get("school"), 120), sanitize_line(item.get("location"), 120)] if value)[:220],
+                "bullet": bullet,
+            }
+        )
+
+    return fallback
 
 
 def _build_cover_letter_prompt_payload(profile: dict, draft_payload: dict) -> dict:
@@ -890,6 +1193,51 @@ def _parse_career_evaluation_row(row: dict) -> dict:
         "input_text": row.get("input_text") or "",
         "output": _json_value(row.get("output_json"), {}),
         "created_at": row.get("created_at"),
+    }
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    text = str(value).strip()
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            return datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+
+
+def _is_prep_stale(prep_updated_at: str | None, *source_timestamps: str | None) -> bool:
+    prep_dt = _parse_iso_datetime(prep_updated_at)
+    if not prep_dt:
+        return False
+    for raw in source_timestamps:
+        source_dt = _parse_iso_datetime(raw)
+        if source_dt and source_dt > prep_dt:
+            return True
+    return False
+
+
+def _parse_application_prep_row(row: dict, profile_updated_at: str | None = None, application_updated_at: str | None = None) -> dict:
+    updated_at = row.get("updated_at")
+    return {
+        "id": row["id"],
+        "application_id": row.get("application_id"),
+        "profile_id": row.get("profile_id"),
+        "status": row.get("status") or "ready",
+        "target_snapshot": _json_value(row.get("target_snapshot_json"), {}),
+        "fit_summary": _json_value(row.get("fit_summary_json"), {}),
+        "selected_evidence": _json_value(row.get("selected_evidence_json"), {}),
+        "interview_questions": _json_value(row.get("interview_questions_json"), {}),
+        "star_stories": _json_value(row.get("star_stories_json"), []),
+        "portfolio_ideas": _json_value(row.get("portfolio_ideas_json"), []),
+        "strengthening_actions": _json_value(row.get("strengthening_actions_json"), []),
+        "copy_notes": _json_value(row.get("copy_notes_json"), []),
+        "generated_at": row.get("generated_at"),
+        "updated_at": updated_at,
+        "is_stale": _is_prep_stale(updated_at, profile_updated_at, application_updated_at),
     }
 
 
@@ -1031,6 +1379,89 @@ async def _load_cv_target(body: CvDraftBody, user_id: int) -> tuple[str, dict]:
     raise HTTPException(400, "application_id or result_id is required")
 
 
+async def _load_application(user_id: int, app_id: int) -> dict:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM applications WHERE id = ? AND user_id = ?",
+            (app_id, user_id),
+        )
+        row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "Application not found")
+    return _parse_app(dict(row))
+
+
+async def _fetch_application_prep_row(user_id: int, app_id: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM application_preps WHERE user_id = ? AND application_id = ?",
+            (user_id, app_id),
+        )
+        row = await cur.fetchone()
+    return dict(row) if row else None
+
+
+async def _save_application_prep(
+    *,
+    user_id: int,
+    application_id: int,
+    profile_id: int | None,
+    payload: dict,
+    status: str = "ready",
+) -> dict:
+    now = datetime.utcnow().isoformat()
+    generated_at = now if status == "ready" else None
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute(
+            """INSERT INTO application_preps
+               (user_id, application_id, profile_id, status, target_snapshot_json, fit_summary_json,
+                selected_evidence_json, interview_questions_json, star_stories_json, portfolio_ideas_json,
+                strengthening_actions_json, copy_notes_json, generated_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(user_id, application_id) DO UPDATE SET
+                 profile_id = excluded.profile_id,
+                 status = excluded.status,
+                 target_snapshot_json = excluded.target_snapshot_json,
+                 fit_summary_json = excluded.fit_summary_json,
+                 selected_evidence_json = excluded.selected_evidence_json,
+                 interview_questions_json = excluded.interview_questions_json,
+                 star_stories_json = excluded.star_stories_json,
+                 portfolio_ideas_json = excluded.portfolio_ideas_json,
+                 strengthening_actions_json = excluded.strengthening_actions_json,
+                 copy_notes_json = excluded.copy_notes_json,
+                 generated_at = excluded.generated_at,
+                 updated_at = excluded.updated_at""",
+            (
+                user_id,
+                application_id,
+                profile_id,
+                status,
+                dumps_json(payload.get("target_snapshot") or {}),
+                dumps_json(payload.get("fit_summary") or {}),
+                dumps_json(payload.get("selected_evidence") or {}),
+                dumps_json(payload.get("interview_questions") or {}),
+                dumps_json(payload.get("star_stories") or []),
+                dumps_json(payload.get("portfolio_ideas") or []),
+                dumps_json(payload.get("strengthening_actions") or []),
+                dumps_json(payload.get("copy_notes") or []),
+                generated_at,
+                now,
+            ),
+        )
+        await db.commit()
+        cur = await db.execute(
+            "SELECT * FROM application_preps WHERE user_id = ? AND application_id = ?",
+            (user_id, application_id),
+        )
+        row = await cur.fetchone()
+    if not row:
+        raise HTTPException(500, "Failed to save application prep")
+    return dict(row)
+
+
 async def _run_company_portal_scan_by_id(portal_id: int) -> dict | None:
     run_id = None
     try:
@@ -1148,6 +1579,44 @@ async def get_results(search_id: int):
     return {
         "search": dict(search),
         "results": [_parse_result_row(dict(r)) for r in rows],
+    }
+
+
+@app.get("/api/search/results/{result_id}/summary")
+async def get_result_summary(result_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM results WHERE id = ?", (result_id,))
+        row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "Search result not found")
+
+    result = _parse_result_row(dict(row))
+    fallback_summary = result.get("normalized", {}).get("role_summary") or ""
+    payload = {
+        "job_title": result.get("job_title", ""),
+        "company_name": result.get("company_name", ""),
+        "location": result.get("location", ""),
+        "contract_type": result.get("contract_type", ""),
+        "source": result.get("source", ""),
+        "tool_context": result.get("tool_context", []),
+        "normalized": result.get("normalized", {}),
+    }
+    try:
+        generated = summarize_role_description(payload)
+        summary = sanitize_block(generated.get("summary"), 500) or fallback_summary
+        highlights = sanitize_string_list(generated.get("highlights"), max_items=4, max_length=160)
+        source = "ai"
+    except (AnthropicConfigError, AnthropicResponseError):
+        summary = fallback_summary
+        highlights = result.get("normalized", {}).get("summary_highlights", [])[:3]
+        source = "heuristic"
+
+    return {
+        "result_id": result_id,
+        "summary": summary,
+        "highlights": highlights,
+        "source": source,
     }
 
 
@@ -1348,18 +1817,21 @@ async def copywrite_cv_draft(draft_id: int, current_user=Depends(get_current_use
         raise HTTPException(404, "CV draft not found")
 
     draft = _parse_cv_draft_row(dict(row))
+    used_fallback = False
     try:
         suggestions = generate_cv_copy(draft["prompt_payload"])
     except AnthropicConfigError as error:
         raise HTTPException(400, str(error))
     except AnthropicResponseError as error:
-        raise HTTPException(502, str(error))
+        suggestions = _build_cv_copy_fallback(draft, str(error))
+        used_fallback = True
 
     cleaned = _clean_cv_copy_suggestions(suggestions, draft["selected_payload"])
 
     return {
         "draft_id": draft_id,
-        "model": os.environ.get("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022"),
+        "model": ("fallback-local" if used_fallback else os.environ.get("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022")),
+        "used_fallback": used_fallback,
         "suggestions": cleaned,
     }
 
@@ -1386,6 +1858,12 @@ async def download_cv_draft_pdf(
     copy_suggestions = None
     if body and body.copy_suggestions:
         copy_suggestions = _clean_cv_copy_suggestions(body.copy_suggestions, draft["selected_payload"])
+    else:
+        try:
+            generated = generate_cv_copy(draft["prompt_payload"])
+            copy_suggestions = _clean_cv_copy_suggestions(generated, draft["selected_payload"])
+        except (AnthropicConfigError, AnthropicResponseError):
+            copy_suggestions = None
 
     try:
         html = render_cv_html(profile, draft["template_slug"], draft["selected_payload"], copy_suggestions)
@@ -1516,7 +1994,51 @@ async def generate_cv_draft(body: CvDraftBody, current_user=Depends(get_current_
 
     source_kind, source_record = await _load_cv_target(body, current_user["id"])
     target = build_target_snapshot(source_kind, source_record)
+    job_analysis = build_job_analysis_fallback(target)
+    try:
+        analyzed = analyze_job_posting(
+            {
+                "target": target,
+                "posting_context": {
+                    "title": source_record.get("job_title", ""),
+                    "company_name": source_record.get("company_name", ""),
+                    "location": source_record.get("location", ""),
+                    "contract_type": source_record.get("contract_type", ""),
+                    "source": source_record.get("source", ""),
+                    "tool_context": source_record.get("tool_context", []),
+                    "normalized": source_record.get("normalized") or target.get("normalized") or {},
+                },
+            }
+        )
+        if isinstance(analyzed, dict):
+            job_analysis = analyzed
+    except (AnthropicConfigError, AnthropicResponseError):
+        pass
+
+    target = merge_job_analysis(target, job_analysis)
     draft_payload = build_targeted_cv_draft(profile, target, body.template_slug)
+
+    try:
+        selection = select_cv_evidence(
+            {
+                "job_analysis": target.get("job_analysis") or {},
+                "target": target,
+                "candidate_profile": {
+                    "headline": profile.get("headline", ""),
+                    "summary": profile.get("summary", ""),
+                    "target_roles": profile.get("target_roles", []),
+                    "skills": profile.get("skills", []),
+                    "experience": profile.get("experience", []),
+                    "projects": profile.get("projects", []),
+                    "education": profile.get("education", []),
+                },
+                "current_shortlist": draft_payload.get("selected_payload") or {},
+            }
+        )
+        if isinstance(selection, dict):
+            draft_payload = apply_evidence_selection(profile, draft_payload, selection)
+    except (AnthropicConfigError, AnthropicResponseError):
+        pass
     now = datetime.utcnow().isoformat()
 
     async with aiosqlite.connect(DB_PATH) as db:
@@ -1552,7 +2074,29 @@ async def generate_cv_draft(body: CvDraftBody, current_user=Depends(get_current_
         draft_id = cursor.lastrowid
         row_cur = await db.execute("SELECT * FROM cv_drafts WHERE id = ?", (draft_id,))
         row = await row_cur.fetchone()
-    return _parse_cv_draft_row(dict(row))
+
+    draft_data = _parse_cv_draft_row(dict(row))
+
+    # Run copywrite inline so the frontend only needs one round-trip
+    copy_suggestions = None
+    used_fallback = False
+    try:
+        raw_suggestions = generate_cv_copy(draft_payload["prompt_payload"])
+        copy_suggestions = _clean_cv_copy_suggestions(raw_suggestions, draft_payload["selected_payload"])
+    except AnthropicResponseError as error:
+        copy_suggestions = _clean_cv_copy_suggestions(
+            _build_cv_copy_fallback({"selected_payload": draft_payload["selected_payload"], "target_title": target["job_title"]}, str(error)),
+            draft_payload["selected_payload"],
+        )
+        used_fallback = True
+    except AnthropicConfigError:
+        pass
+
+    return {
+        "draft": draft_data,
+        "copy_suggestions": copy_suggestions,
+        "used_fallback": used_fallback,
+    }
 
 
 @app.get("/api/tracker/statuses")
@@ -2545,10 +3089,10 @@ async def get_stats():
 # ── Background scraping logic ─────────────────────────────────────────────
 async def _run_scrapers(search_id: int, tool: str):
     scrapers = [
-        ("wttj",      WTTJScraper(COOKIES.get("wttj")), 30),
-        ("linkedin",  LinkedInScraper(), 15),
-        ("indeed",    IndeedScraper(COOKIES.get("indeed")), 5),
-        ("jobteaser", JobteaserScraper(COOKIES.get("jobteaser")), 4),
+        ("wttj",      WTTJScraper(COOKIES.get("wttj")), 120),
+        ("linkedin",  LinkedInScraper(), 75),
+        ("indeed",    IndeedScraper(COOKIES.get("indeed")), 60),
+        ("jobteaser", JobteaserScraper(COOKIES.get("jobteaser")), 60),
     ]
 
     async with aiosqlite.connect(DB_PATH) as db:

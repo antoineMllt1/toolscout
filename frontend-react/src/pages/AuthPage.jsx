@@ -1,22 +1,13 @@
 import { useState } from 'react'
 import { useAuth } from '../context/AuthContext'
 
-const AUTH_BENEFITS = [
-  {
-    title: 'Recherche persistante',
-    text: 'Un scraping continue meme si tu changes de page, et le run reste restaurable ensuite.',
-  },
-  {
-    title: 'CV cible par annonce',
-    text: 'La base template est deja la pour brancher des variantes CV, lettre et score de match.',
-  },
-  {
-    title: 'CRM de postulation',
-    text: 'Tu gardes un pipeline clair entre cartes a relire, candidatures envoyees et entretiens.',
-  },
+const FEATURES = [
+  'Search across WTTJ, Indeed, LinkedIn, and JobTeaser at once',
+  'AI selects your best experiences for each role and rewrites them',
+  'Interview prep dossier: questions, STAR stories, portfolio ideas',
 ]
 
-export default function AuthPage({ onSuccess }) {
+export default function AuthPage() {
   const { login, register } = useAuth()
   const [mode, setMode] = useState('login')
   const [email, setEmail] = useState('')
@@ -25,14 +16,13 @@ export default function AuthPage({ onSuccess }) {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
-  async function handleSubmit(event) {
-    event.preventDefault()
+  async function handleSubmit(e) {
+    e.preventDefault()
     setError('')
     setLoading(true)
     try {
       if (mode === 'login') await login(email, password)
       else await register(email, password, name)
-      onSuccess?.()
     } catch (err) {
       setError(err.message)
     } finally {
@@ -40,109 +30,115 @@ export default function AuthPage({ onSuccess }) {
     }
   }
 
+  function switchMode() {
+    setMode(mode === 'login' ? 'register' : 'login')
+    setError('')
+  }
+
   return (
-    <main className="auth-page">
-      <section className="auth-layout">
-        <article className="auth-showcase fade-stagger" style={{ '--index': 0 }}>
-          <div className="auth-brand">
-            <div className="brand-mark" style={{ width: 40, height: 40, borderRadius: 11, background: 'var(--brand-gradient)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 15, fontWeight: 800, color: 'white', boxShadow: 'var(--shadow-brand)' }}>
-              S
+    <div className="auth-shell">
+      <div className="auth-left">
+        <div className="auth-left__logo">StudentHub</div>
+
+        <h1 className="auth-left__headline">
+          Find the role. Build the case. Walk in prepared.
+        </h1>
+        <p className="auth-left__sub">
+          One focused tool for students who want a targeted CV and real interview prep — not a generic application.
+        </p>
+
+        <div className="auth-left__features">
+          {FEATURES.map((text) => (
+            <div key={text} className="auth-feature">
+              <div className="auth-feature__dot" />
+              <div className="auth-feature__text">{text}</div>
             </div>
-            <div className="brand-logo-text">
-              <strong>StageAI</strong>
-              <small>Student workspace</small>
-            </div>
-          </div>
+          ))}
+        </div>
+      </div>
 
-          <div className="hero-copy">
-            <p className="eyebrow is-light">Premium workspace</p>
-            <h1 className="auth-display">Trouve ton stage, prépare ton CV, pilote tes candidatures.</h1>
-            <p className="lede is-light">
-              Un seul espace pour chercher des offres, preparer un CV cible par poste et suivre chaque candidature
-              jusqu'a la reponse finale.
-            </p>
-          </div>
+      <div className="auth-right">
+        <div className="auth-form">
+          <h2 className="auth-form__title">
+            {mode === 'login' ? 'Welcome back' : 'Create your account'}
+          </h2>
+          <p className="auth-form__sub">
+            {mode === 'login'
+              ? 'Sign in to continue where you left off.'
+              : 'Free to use. No credit card required.'}
+          </p>
 
-          <ul className="auth-feature-list">
-            {AUTH_BENEFITS.map((item) => (
-              <li key={item.title}>
-                <strong>{item.title}</strong>
-                <span>{item.text}</span>
-              </li>
-            ))}
-          </ul>
-        </article>
-
-        <section className="auth-panel auth-form-panel fade-stagger" style={{ '--index': 1 }}>
-          <div className="auth-mode-switch" role="tablist" aria-label="Authentication mode">
-            <button
-              type="button"
-              className={`auth-mode-chip ${mode === 'login' ? 'is-active' : ''}`}
-              onClick={() => setMode('login')}
-            >
-              Connexion
-            </button>
-            <button
-              type="button"
-              className={`auth-mode-chip ${mode === 'register' ? 'is-active' : ''}`}
-              onClick={() => setMode('register')}
-            >
-              Creation
-            </button>
-          </div>
-
-          <div className="auth-copy">
-            <p className="eyebrow">{mode === 'login' ? 'Connexion' : 'Creation de compte'}</p>
-            <h2>{mode === 'login' ? 'Recupere tes runs et ton pipeline.' : 'Active ton cockpit candidat.'}</h2>
-            <p className="panel-note">
-              {mode === 'login'
-                ? 'Reprends tes recherches, veilles et candidatures la ou tu les as laissees.'
-                : 'Le compte sert a garder tes veilles, ton CRM et tes futures variantes CV dans la duree.'}
-            </p>
-          </div>
-
-          <form className="auth-form" onSubmit={handleSubmit}>
+          <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--s3)' }}>
             {mode === 'register' && (
-              <label className="field-stack">
-                <span>Nom affiche</span>
-                <input value={name} onChange={(event) => setName(event.target.value)} placeholder="Prenom Nom" />
-              </label>
+              <div className="field-stack">
+                <div className="field-label">Full name</div>
+                <input
+                  type="text"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  required
+                  placeholder="Marie Dupont"
+                  autoComplete="name"
+                />
+              </div>
             )}
 
-            <label className="field-stack">
-              <span>Email</span>
+            <div className="field-stack">
+              <div className="field-label">Email address</div>
               <input
-                value={email}
-                onChange={(event) => setEmail(event.target.value)}
                 type="email"
-                placeholder="toi@exemple.com"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                required
+                placeholder="marie@example.com"
+                autoComplete="email"
               />
-            </label>
+            </div>
 
-            <label className="field-stack">
-              <span>Mot de passe</span>
+            <div className="field-stack">
+              <div className="field-label">Password</div>
               <input
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
                 type="password"
-                placeholder="Minimum 6 caracteres"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
+                placeholder="••••••••"
+                autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
               />
-            </label>
+            </div>
 
-            {error && <div className="feedback-box danger">{error}</div>}
+            {error && (
+              <div className="callout callout--error">{error}</div>
+            )}
 
-            <button className="primary-button" type="submit" disabled={loading}>
-              {loading ? 'Chargement...' : mode === 'login' ? 'Entrer dans le cockpit' : 'Creer le compte'}
+            <button
+              type="submit"
+              className="btn"
+              disabled={loading}
+              style={{ marginTop: 'var(--s2)', width: '100%' }}
+            >
+              {loading
+                ? 'One moment...'
+                : mode === 'login' ? 'Sign in' : 'Create account'}
             </button>
           </form>
 
-          <p className="auth-footer">
-            {mode === 'login'
-              ? "Pas encore de compte ? Passe en creation pour sauvegarder tes futures veilles."
-              : 'Tu as deja un compte ? Reviens en connexion pour reprendre ton espace.'}
+          <p style={{ textAlign: 'center', marginTop: 'var(--s5)', fontSize: '0.875rem', color: 'var(--ink-3)' }}>
+            {mode === 'login' ? "No account yet? " : "Already have an account? "}
+            <button
+              type="button"
+              onClick={switchMode}
+              style={{
+                color: 'var(--brand-ink)', fontWeight: 600,
+                background: 'none', border: 'none', cursor: 'pointer',
+                padding: 0, fontSize: 'inherit',
+              }}
+            >
+              {mode === 'login' ? 'Sign up' : 'Sign in'}
+            </button>
           </p>
-        </section>
-      </section>
-    </main>
+        </div>
+      </div>
+    </div>
   )
 }

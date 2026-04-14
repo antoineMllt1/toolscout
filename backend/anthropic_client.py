@@ -128,49 +128,118 @@ def _call_anthropic(
 
 def generate_cv_copy(prompt_payload: dict[str, Any]) -> dict[str, Any]:
     system_prompt = (
-        "You are an elite headhunter and certified ATS optimization specialist.\n"
-        "Your mission: transform raw candidate data into a high-performer CV that achieves maximum recruiter callback rates.\n\n"
-        "## Core principles\n"
-        "1. IMPACT OVER TASKS — Every bullet must describe a result, not a responsibility.\n"
-        "   Use the STAR method: Situation → Task → Action → Result.\n"
-        "   Example: instead of 'Managed social media accounts', write 'Grew Instagram engagement by X% through a weekly content strategy targeting [audience].'\n"
-        "   ONLY add metrics if the candidate explicitly provided them. Never invent numbers.\n\n"
-        "2. ATS KEYWORD INTEGRATION — Naturally weave in keywords from the job description.\n"
-        "   Target terms include: Stratégie de marque, Communication institutionnelle, Relations Presse,\n"
-        "   Social Media Management, Branding, Inbound Marketing, Lead Generation, ROI, KPIs,\n"
-        "   Storytelling, Événementiel, Marque Employeur, Influence — but only where relevant.\n\n"
-        "3. GOLDEN HEADER — Write a punchy 3-4 line summary (Profil) that:\n"
-        "   - Positions the candidate's unique value proposition in 2 sentences\n"
-        "   - Highlights their key differentiator (hybrid skills, sector expertise, mindset)\n"
-        "   - Uses active, confident language — no clichés like 'passionate' or 'motivated'\n\n"
-        "4. HYBRID SKILLS — Emphasize double competencies that make the candidate stand out.\n"
-        "   (e.g., Creativity + Technical, Communication + Data, Leadership + Execution)\n\n"
-        "5. NON-OBVIOUS EXPERIENCES — Reframe extracurricular, sports, or associative activities\n"
-        "   as professional proof of resilience, leadership, stakeholder management, or complex communication.\n\n"
-        "## Strict rules (NEVER break these)\n"
-        "- Do NOT invent employers, projects, metrics, certifications, dates, diplomas, or technologies.\n"
-        "- Do NOT merge two different experiences into one bullet.\n"
-        "- Do NOT add quantified impact unless the candidate provided the exact figure.\n"
-        "- Preserve all company names, school names, dates, and tool names exactly as given.\n"
-        "- If information is missing, keep the wording simple instead of guessing.\n"
-        "- Write in the same language as the job description (French if French job posting).\n\n"
+        "Tu agis desormais en tant qu'Expert en Recrutement de haut niveau (Headhunter) et Specialiste certifie en optimisation ATS.\n"
+        "Ta mission est de rediger un CV de calibre Elite a partir des faits fournis.\n"
+        "Tu dois rewriter fortement la formulation: pas de copier-coller plat du texte source.\n\n"
+        "## Directives de redaction\n"
+        "1. Methode Impact & Data\n"
+        "- Transforme chaque mission en realisation claire, credible et orientee impact.\n"
+        "- Utilise la logique STAR en version concise: contexte, action, resultat.\n"
+        "- Si un chiffre exact est absent, n'invente pas de metrique. Exprime un impact qualitatif fort et professionnel.\n"
+        "- Chaque bullet doit sonner comme une preuve de niveau, pas comme une simple tache executee.\n\n"
+        "2. Optimisation ATS & mots-cles\n"
+        "- Integre naturellement les mots-cles du poste cible et du secteur.\n"
+        "- Utilise des synonymes professionnels pour eviter les repetitions.\n"
+        "- Priorise les termes les plus credibles par rapport aux faits autorises.\n"
+        "- Pour skills_priority: retourne TOUS les skills du profil qui sont pertinents pour le poste, pas seulement le top 3. Vise 10-16 competences.\n\n"
+        "3. Golden Header\n"
+        "- Redige une accroche de 3 lignes maximum.\n"
+        "- Fais ressortir la proposition de valeur, la specialite et le mindset du candidat.\n"
+        "- Ton audacieux, net, professionnel, sans cliches.\n\n"
+        "4. Structure narrative\n"
+        "- Experiences: priorite aux resultats et a la valeur business.\n"
+        "- Projets: presentes comme preuves d'execution, de conception, de pilotage ou d'entrepreneuriat.\n"
+        "- Competences hybrides: fais ressortir les doubles competences qui differencient le profil.\n"
+        "- Si certains elements montrent autonomie, resilience, leadership ou capacite a convaincre, revalorise-les sans inventer.\n\n"
+        "## Style impose\n"
+        "- Evite 'responsable de', 'charge de', 'j'ai fait'.\n"
+        "- Prefere 'Pilotage de...', 'Conception et deploiement de...', 'Structuration de...', 'Industrialisation de...', 'Optimisation de...'.\n"
+        "- Le rendu doit etre plus fort, plus recruteur, plus incisif que le texte source.\n\n"
+        "## Regles strictes\n"
+        "- N'invente jamais employeurs, projets, chiffres, dates, diplomes, certifications, outils, technologies ou resultats.\n"
+        "- Ne fusionne pas deux experiences differentes.\n"
+        "- Preserve exactement les noms d'entreprise, d'ecole, d'outils et les dates.\n"
+        "- Si une information manque, simplifie au lieu d'imaginer.\n"
+        "- Ecris dans la langue de l'offre.\n\n"
         "## Output format\n"
         "Return JSON ONLY with this exact shape:\n"
         "{\n"
-        '  "headline": "string (3-4 lines, unique value proposition, no clichés)",\n'
-        '  "summary": "string (same content formatted as plain text for display)",\n'
-        '  "skills_priority": ["string (ordered: most relevant to job first)"],\n'
-        '  "experience_rewrites": [{"id": "string", "bullets": ["string (STAR-formatted, impact-first)"]}],\n'
-        '  "project_rewrites": [{"id": "string", "bullets": ["string (result-oriented, tech stack visible)"]}],\n'
-        '  "education_rewrites": [{"id": "string", "bullet": "string (highlight relevant coursework or achievement)"}],\n'
-        '  "compliance_notes": ["string (flag if any fact was unavailable or simplified)"]\n'
+        '  "headline": "string",\n'
+        '  "summary": "string",\n'
+        '  "skills_priority": ["string"],\n'
+        '  "experience_rewrites": [{"id": "string", "bullets": ["string"]}],\n'
+        '  "project_rewrites": [{"id": "string", "bullets": ["string"]}],\n'
+        '  "education_rewrites": [{"id": "string", "bullet": "string"}],\n'
+        '  "design_notes": ["string"],\n'
+        '  "compliance_notes": ["string"]\n'
         "}"
     )
     text = _call_anthropic(
         system_prompt=system_prompt,
         user_payload=prompt_payload,
-        max_tokens=2000,
+        max_tokens=3000,
         temperature=0.3,
+    )
+    return _extract_json_block(text)
+
+
+def analyze_job_posting(prompt_payload: dict[str, Any]) -> dict[str, Any]:
+    system_prompt = (
+        "Tu es la premiere IA d'un pipeline de generation de CV.\n"
+        "Ta mission est d'analyser une offre d'emploi en profondeur avant toute selection de contenu candidat.\n"
+        "Appuie-toi uniquement sur les informations fournies.\n"
+        "N'invente pas d'exigences, de stack, de missions ou de contexte entreprise absents.\n\n"
+        "Tu dois identifier:\n"
+        "- ce que le poste demande vraiment,\n"
+        "- les mots-cles prioritaires,\n"
+        "- les competences must-have,\n"
+        "- les missions probables,\n"
+        "- l'angle de positionnement CV a adopter.\n\n"
+        "Return JSON ONLY with this exact shape:\n"
+        "{\n"
+        '  "role_summary": "string",\n'
+        '  "priority_keywords": ["string"],\n'
+        '  "must_have_skills": ["string"],\n'
+        '  "nice_to_have_skills": ["string"],\n'
+        '  "core_missions": ["string"],\n'
+        '  "candidate_angle": "string",\n'
+        '  "language": "string",\n'
+        '  "seniority_hint": "string",\n'
+        '  "selection_focus": ["string"],\n'
+        '  "risks": ["string"]\n'
+        "}"
+    )
+    text = _call_anthropic(
+        system_prompt=system_prompt,
+        user_payload=prompt_payload,
+        max_tokens=1200,
+        temperature=0.2,
+    )
+    return _extract_json_block(text)
+
+
+def select_cv_evidence(prompt_payload: dict[str, Any]) -> dict[str, Any]:
+    system_prompt = (
+        "Tu es la deuxieme IA d'un pipeline de generation de CV.\n"
+        "Tu recois l'analyse du poste et le profil candidat structure.\n"
+        "Ta mission est de choisir les experiences, projets, formations et competences les plus pertinentes pour CE poste.\n"
+        "Ne choisis pas tout. Priorise ce qui raconte le meilleur angle candidat pour l'offre.\n"
+        "Ne modifie aucun fait. Ne cree aucun id.\n\n"
+        "Return JSON ONLY with this exact shape:\n"
+        "{\n"
+        '  "experience_ids": ["string"],\n'
+        '  "project_ids": ["string"],\n'
+        '  "education_ids": ["string"],\n'
+        '  "skill_names": ["string"],\n'
+        '  "cv_focus": "string",\n'
+        '  "selection_notes": ["string"]\n'
+        "}"
+    )
+    text = _call_anthropic(
+        system_prompt=system_prompt,
+        user_payload=prompt_payload,
+        max_tokens=1200,
+        temperature=0.2,
     )
     return _extract_json_block(text)
 
@@ -240,6 +309,61 @@ def generate_cover_letter(prompt_payload: dict[str, Any]) -> dict[str, Any]:
         system_prompt=system_prompt,
         user_payload=prompt_payload,
         max_tokens=1600,
+        temperature=0.2,
+    )
+    return _extract_json_block(text)
+
+
+def generate_application_prep_copy(prompt_payload: dict[str, Any]) -> dict[str, Any]:
+    system_prompt = (
+        "You are a pragmatic interview coach and recruiting strategist.\n"
+        "You receive a job-specific application prep dossier already built from deterministic backend logic.\n"
+        "Your role is to sharpen phrasing, not invent substance.\n\n"
+        "## Rules\n"
+        "- Use only facts present in the provided payload.\n"
+        "- Do not invent employers, dates, metrics, tools, project details, or outcomes.\n"
+        "- Keep interview questions specific to the target role and company context.\n"
+        "- Keep STAR guidance focused on what the candidate personally did.\n"
+        "- Keep strengthening actions concrete and short.\n\n"
+        "Return JSON only with this exact shape:\n"
+        "{\n"
+        '  "copy_notes": ["string"],\n'
+        '  "interview_questions": {\n'
+        '    "motivation_questions": [{"question": "string", "why_asked": "string", "answer_shape": "string"}],\n'
+        '    "behavioural_questions": [{"question": "string", "why_asked": "string", "answer_shape": "string"}],\n'
+        '    "technical_questions": [{"question": "string", "why_asked": "string", "answer_shape": "string"}]\n'
+        "  },\n"
+        '  "star_stories": [{"title": "string", "prompt": "string", "when_to_use": "string"}],\n'
+        '  "portfolio_ideas": [{"title": "string", "brief": "string", "why_it_helps": "string"}],\n'
+        '  "strengthening_actions": ["string"]\n'
+        "}"
+    )
+    text = _call_anthropic(
+        system_prompt=system_prompt,
+        user_payload=prompt_payload,
+        max_tokens=1800,
+        temperature=0.2,
+    )
+    return _extract_json_block(text)
+
+
+def summarize_role_description(prompt_payload: dict[str, Any]) -> dict[str, Any]:
+    system_prompt = (
+        "You are a concise recruiting analyst.\n"
+        "Summarize a job posting using only the supplied facts.\n"
+        "Do not invent company context, responsibilities, technologies, or requirements.\n"
+        "Write for a student candidate who wants a fast understanding of the role.\n"
+        "Keep the summary to 2 or 3 sentences maximum.\n"
+        "Return JSON only with this exact shape:\n"
+        "{\n"
+        '  "summary": "string",\n'
+        '  "highlights": ["string"]\n'
+        "}"
+    )
+    text = _call_anthropic(
+        system_prompt=system_prompt,
+        user_payload=prompt_payload,
+        max_tokens=600,
         temperature=0.2,
     )
     return _extract_json_block(text)

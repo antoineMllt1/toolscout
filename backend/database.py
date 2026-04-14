@@ -60,6 +60,30 @@ CREATE INDEX IF NOT EXISTS idx_searches_tool        ON searches(tool_name);
 CREATE INDEX IF NOT EXISTS idx_applications_user    ON applications(user_id);
 CREATE INDEX IF NOT EXISTS idx_applications_status  ON applications(user_id, status);
 
+CREATE TABLE IF NOT EXISTS application_preps (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    application_id INTEGER NOT NULL,
+    profile_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'ready',
+    target_snapshot_json TEXT DEFAULT '{}',
+    fit_summary_json TEXT DEFAULT '{}',
+    selected_evidence_json TEXT DEFAULT '{}',
+    interview_questions_json TEXT DEFAULT '{}',
+    star_stories_json TEXT DEFAULT '[]',
+    portfolio_ideas_json TEXT DEFAULT '[]',
+    strengthening_actions_json TEXT DEFAULT '[]',
+    copy_notes_json TEXT DEFAULT '[]',
+    generated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (application_id) REFERENCES applications(id) ON DELETE CASCADE,
+    FOREIGN KEY (profile_id) REFERENCES cv_profiles(id) ON DELETE SET NULL,
+    UNIQUE(user_id, application_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_application_preps_user_app ON application_preps(user_id, application_id);
+
 CREATE TABLE IF NOT EXISTS watchlists (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,

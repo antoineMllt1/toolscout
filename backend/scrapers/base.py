@@ -191,6 +191,67 @@ class BaseScraper:
 
         return unique[:4]
 
+    def extract_search_context(self, text: str, query: str, title: str = "") -> list[str]:
+        direct_context = self.extract_tool_context(text, query)
+        if direct_context:
+            return direct_context
+
+        normalized_query = self._normalize_for_match(query)
+        tokens = [token for token in re.split(r"\s+", normalized_query) if len(token) > 2]
+
+        normalized_title = self._normalize_for_match(title)
+        normalized_text = self._normalize_for_match(text)
+
+        chunks = re.split(r"[\n•\-–—]|(?<=[.!?])\s+", text or "")
+        if len(tokens) == 1:
+            token = tokens[0] if tokens else ""
+            if token and token in normalized_title and title:
+                return [title.strip()]
+
+            excerpts = []
+            for chunk in chunks:
+                stripped = chunk.strip()
+                if len(stripped) < 25:
+                    continue
+                if token and token in self._normalize_for_match(stripped):
+                    excerpts.append(stripped)
+                if len(excerpts) >= 4:
+                    break
+            return excerpts[:4]
+
+        if len(tokens) < 2:
+            return []
+
+        if normalized_query and (normalized_query in normalized_title or all(token in normalized_title for token in tokens)):
+            return [title.strip()] if title else []
+
+        excerpts = []
+        minimum_hits = len(tokens) if len(tokens) <= 3 else len(tokens) - 1
+        for chunk in chunks:
+            stripped = chunk.strip()
+            if len(stripped) < 25:
+                continue
+            normalized_chunk = self._normalize_for_match(stripped)
+            if normalized_query and normalized_query in normalized_chunk:
+                excerpts.append(stripped)
+            else:
+                chunk_hits = sum(token in normalized_chunk for token in tokens)
+                if chunk_hits >= minimum_hits:
+                    excerpts.append(stripped)
+            if len(excerpts) >= 4:
+                break
+
+        if excerpts:
+            return excerpts[:4]
+        title_hits = sum(token in normalized_title for token in tokens)
+        text_hits = sum(token in normalized_text for token in tokens)
+        if title and title_hits >= minimum_hits and text_hits >= minimum_hits:
+            return [title.strip()]
+        return []
+
+    def _normalize_for_match(self, value: str) -> str:
+        return re.sub(r"\s+", " ", value or "").strip().lower()
+
     def safe_get(self, url: str, **kwargs) -> requests.Response | None:
         try:
             resp = self.session.get(url, timeout=12, **kwargs)

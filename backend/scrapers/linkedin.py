@@ -9,6 +9,7 @@ Strategy:
 
 No cookies or authentication needed. Stop on 429/999 to avoid IP bans.
 """
+import random
 import re
 import time
 from typing import Iterator
@@ -19,11 +20,12 @@ SEARCH_URL = "https://www.linkedin.com/jobs/search/"
 GUEST_URL = "https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{job_id}"
 DETAIL_URL = "https://www.linkedin.com/jobs/view/{job_id}"
 
-LI_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.0.0 Safari/537.36"
-)
+_LI_UAS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+]
 
 DESC_SEL = (
     ".show-more-less-html__markup, "
@@ -35,9 +37,10 @@ DESC_SEL = (
 
 class LinkedInScraper(BaseScraper):
     SOURCE = "linkedin"
-    DELAY = 0.6
-    MAX_PAGES = 2
-    MAX_DURATION = 30
+    DELAY = 1.2          # base delay between requests
+    DELAY_JITTER = 0.6   # ± random jitter added on top
+    MAX_PAGES = 6
+    MAX_DURATION = 90
 
     def __init__(self, cookies: dict | None = None):
         super().__init__(cookies)
@@ -46,7 +49,7 @@ class LinkedInScraper(BaseScraper):
 
         self.session = _req.Session()
         self.session.headers.clear()
-        self.session.headers["User-Agent"] = LI_UA
+        self.session.headers["User-Agent"] = random.choice(_LI_UAS)
         self._rate_limited = False
 
     def search(self, tool: str, max_results: int = 50) -> Iterator[JobResult]:
@@ -85,11 +88,11 @@ class LinkedInScraper(BaseScraper):
                     seen_ids.add(job_id)
 
                     description = self._fetch_description_guest(job_id)
-                    time.sleep(self.DELAY)
+                    time.sleep(self.DELAY + random.uniform(0, self.DELAY_JITTER))
                     if not description:
                         continue
 
-                    context = self.extract_tool_context(description, tool)
+                    context = self.extract_search_context(description, tool, card.get("title", ""))
                     if not context:
                         continue
 
@@ -111,7 +114,7 @@ class LinkedInScraper(BaseScraper):
                     break
 
                 start += 25
-                time.sleep(self.DELAY)
+                time.sleep(self.DELAY + random.uniform(0, self.DELAY_JITTER))
 
             if count >= max_results or self._rate_limited:
                 break

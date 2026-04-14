@@ -23,11 +23,11 @@ PLAYWRIGHT_UA = (
 class JobteaserScraper(BaseScraper):
     SOURCE = "jobteaser"
     DELAY = 0.35
-    MAX_PAGES = 1
-    MAX_SCANNED_JOBS = 4
-    MAX_DURATION = 10
-    SEARCH_TIMEOUT_MS = 10000
-    DETAIL_TIMEOUT_MS = 4000
+    MAX_PAGES = 20
+    MAX_SCANNED_JOBS = 120
+    MAX_DURATION = 70
+    SEARCH_TIMEOUT_MS = 15000
+    DETAIL_TIMEOUT_MS = 7000
 
     _RESULT_SELECTOR = "[class*=JobAdCard_main], a[href*='/job-offers/']"
     _DESC_SELECTORS = (
@@ -115,12 +115,15 @@ class JobteaserScraper(BaseScraper):
                     continue
                 seen_urls.add(url)
 
+                if not self._should_fetch_detail(job, tool):
+                    continue
+
                 description = self._fetch_detail_playwright(detail_page, url)
                 time.sleep(self.DELAY)
                 if not description:
                     continue
 
-                context = self.extract_tool_context(description, tool)
+                context = self.extract_search_context(description, tool, job.get("title", ""))
                 if not context:
                     continue
 
@@ -161,45 +164,31 @@ class JobteaserScraper(BaseScraper):
 
     def _load_search_results(self, page, tool: str, max_results: int, started_at: float) -> list[dict]:
         jobs: list[dict] = []
-
-        for search_term in self._get_search_terms(tool):
+        pages_done = 0
+        total_pages = self.MAX_PAGES
+        candidate_target = max(max_results * 3, max_results + 12)
+        while pages_done < min(total_pages, self.MAX_PAGES):
             if time.monotonic() - started_at > self.MAX_DURATION:
-                break
+                return jobs
 
-            url = f"{SEARCH_URL}?query={search_term}&lang=fr&country%5B%5D=FR"
+            url = f"{SEARCH_URL}?lang=fr&country%5B%5D=FR&page={pages_done + 1}"
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=self.SEARCH_TIMEOUT_MS)
             except Exception as e:
                 self.log.warning("Jobteaser navigation failed for %s: %s", url, e)
-                continue
+                break
+            if not self._wait_for_results(page):
+                break
 
-            pages_done = 0
-            while len(jobs) < max_results and pages_done < self.MAX_PAGES:
-                if time.monotonic() - started_at > self.MAX_DURATION:
-                    return jobs
-                if not self._wait_for_results(page):
-                    break
-
-                page_jobs = self._parse_results_html(page.content())
-                self.log.info("Jobteaser term=%s page=%s cards=%s", search_term, pages_done + 1, len(page_jobs))
-                if not page_jobs:
-                    break
-                jobs.extend(page_jobs)
-                pages_done += 1
-
-                try:
-                    next_btn = page.query_selector(
-                        'button[aria-label*="suivant"], button[aria-label*="next"], '
-                        '[data-testid="pagination-next"], a[rel="next"]'
-                    )
-                    if not next_btn:
-                        break
-                    next_btn.click()
-                    page.wait_for_timeout(800)
-                except Exception:
-                    break
-
-            if jobs:
+            page_jobs = self._parse_results_html(page.content())
+            self.log.info("Jobteaser generic page=%s cards=%s", pages_done + 1, len(page_jobs))
+            if not page_jobs:
+                break
+            total_pages = self._extract_total_pages(page.content()) or total_pages
+            jobs.extend(page_jobs)
+            pages_done += 1
+            candidate_count = sum(1 for job in jobs if self._should_fetch_detail(job, tool))
+            if candidate_count >= candidate_target:
                 break
 
         deduped = []
@@ -211,22 +200,26 @@ class JobteaserScraper(BaseScraper):
                 deduped.append(job)
         return deduped
 
+    def _extract_total_pages(self, html: str) -> int:
+        soup = parse_html(html)
+        page_links = soup.select("a[aria-label*='page']")
+        page_numbers = []
+        for link in page_links:
+            label = link.get("aria-label", "")
+            digits = "".join(ch for ch in label if ch.isdigit())
+            if digits:
+                try:
+                    page_numbers.append(int(digits))
+                except ValueError:
+                    continue
+        return max(page_numbers) if page_numbers else 0
+
     def _get_search_terms(self, tool: str) -> list[str]:
-        aliases = [tool] + self.get_aliases(tool)
-        ordered = []
-        seen = set()
-        for alias in aliases:
-            key = alias.strip().lower()
-            if key and key not in seen:
-                seen.add(key)
-                ordered.append(alias)
-            if len(ordered) >= 2:
-                break
-        return ordered
+        return [tool]
 
     def _wait_for_results(self, page) -> bool:
-        for _ in range(3):
-            page.wait_for_timeout(900)
+        for _ in range(8):
+            page.wait_for_timeout(1250)
             html = page.content().lower()
             if "just a moment" in html:
                 continue
@@ -239,7 +232,7 @@ class JobteaserScraper(BaseScraper):
 
     def _parse_results_html(self, html: str) -> list[dict]:
         soup = parse_html(html)
-        cards = soup.select("[class*=JobAdCard_main]")
+        cards = soup.select("[class*=JobAdCard_main], article:has(a[href*='/job-offers/']), li:has(a[href*='/job-offers/'])")
         jobs = []
 
         for card in cards:
@@ -262,9 +255,10 @@ class JobteaserScraper(BaseScraper):
                 if p_el:
                     company = p_el.get_text(strip=True)
 
-            spans = card.select("span[class*=sk-Text]")
+            spans = card.select("span[class*=sk-Text], [class*=Tag], [class*=meta]")
             contract = spans[0].get_text(strip=True) if len(spans) > 0 else ""
             location = spans[1].get_text(strip=True) if len(spans) > 1 else ""
+            card_text = card.get_text(" ", strip=True)
 
             jobs.append(
                 {
@@ -273,9 +267,35 @@ class JobteaserScraper(BaseScraper):
                     "url": url,
                     "location": location,
                     "contract": contract,
+                    "card_text": card_text,
                 }
             )
         return jobs
+
+    def _should_fetch_detail(self, job: dict, tool: str) -> bool:
+        query = self._normalize_for_match(tool)
+        haystack = self._normalize_for_match(
+            " ".join(
+                [
+                    job.get("title", ""),
+                    job.get("company", ""),
+                    job.get("location", ""),
+                    job.get("contract", ""),
+                    job.get("card_text", ""),
+                ]
+            )
+        )
+        if not query:
+            return True
+        if query in haystack:
+            return True
+
+        tokens = [token for token in query.split() if len(token) > 2]
+        if not tokens:
+            return True
+
+        hits = sum(token in haystack for token in tokens)
+        return hits >= max(1, len(tokens) - 1)
 
     def _fetch_detail_playwright(self, page, url: str) -> str:
         try:

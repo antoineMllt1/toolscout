@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 import { createContext, useContext, useState, useEffect } from 'react'
 
 const AuthContext = createContext(null)
@@ -27,11 +28,11 @@ function buildAuthError(response, payload, fallbackMessage) {
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null)
   const [token, setToken] = useState(() => localStorage.getItem('ts_token') || '')
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(() => Boolean(localStorage.getItem('ts_token') || ''))
 
   // Fetch current user on mount
   useEffect(() => {
-    if (!token) { setLoading(false); return }
+    if (!token) return
     fetch('/api/auth/me', { headers: { Authorization: `Bearer ${token}` } })
       .then(async (response) => {
         const payload = await readResponsePayload(response)
@@ -104,6 +105,7 @@ export function AuthProvider({ children }) {
     localStorage.removeItem('ts_token')
     setToken('')
     setUser(null)
+    setLoading(false)
   }
 
   return (

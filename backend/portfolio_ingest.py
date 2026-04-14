@@ -22,6 +22,11 @@ except ModuleNotFoundError:
     from backend.anthropic_client import extract_portfolio_snapshot
 
 try:
+    from anthropic_client import AnthropicConfigError, AnthropicResponseError, generate_application_prep_copy
+except ModuleNotFoundError:
+    from backend.anthropic_client import AnthropicConfigError, AnthropicResponseError, generate_application_prep_copy
+
+try:
     from scrapers.base import parse_html
 except ModuleNotFoundError:
     from backend.scrapers.base import parse_html
@@ -1943,3 +1948,334 @@ def build_application_plan(profile: dict) -> dict:
         "priority_actions": priority_actions,
         "next_week_plan": next_week_plan,
     }
+
+
+def _entry_label(entry: dict, kind: str) -> str:
+    if kind == "experience":
+        return " - ".join(part for part in [entry.get("title"), entry.get("company")] if part).strip()
+    if kind == "project":
+        return entry.get("name") or entry.get("role") or "Project"
+    return " - ".join(part for part in [entry.get("degree"), entry.get("school")] if part).strip() or "Education"
+
+
+def _entry_focus_points(entry: dict, kind: str) -> list[str]:
+    if kind == "experience":
+        raw = [entry.get("summary"), *(entry.get("highlights") or []), *(entry.get("skills") or [])]
+    elif kind == "project":
+        raw = [entry.get("summary"), *(entry.get("highlights") or []), *(entry.get("technologies") or [])]
+    else:
+        raw = [entry.get("summary"), *(entry.get("highlights") or []), *(entry.get("skills") or [])]
+    return sanitize_string_list(raw, max_items=4, max_length=140)
+
+
+def _selected_role_playbooks(profile: dict, target_snapshot: dict) -> list[dict]:
+    target_text = " ".join(
+        [
+            target_snapshot.get("job_title", ""),
+            target_snapshot.get("company_name", ""),
+            target_snapshot.get("location", ""),
+            " ".join(target_snapshot.get("keywords") or []),
+            " ".join(target_snapshot.get("excerpts") or []),
+        ]
+    )
+    normalized_target = _normalize_text(target_text)
+    matched = []
+    for playbook in _match_playbooks(profile):
+        if any(keyword in normalized_target for keyword in playbook["keywords"]):
+            matched.append(playbook)
+    if not matched:
+        matched = _match_playbooks(profile)
+    return matched[:3]
+
+
+def _build_fit_summary(selected_payload: dict) -> dict:
+    target = selected_payload.get("target") or {}
+    match_summary = selected_payload.get("match_summary") or {}
+    evidence = []
+    for kind in ["experience", "projects", "education"]:
+        entries = selected_payload.get(kind) or []
+        if not entries:
+            continue
+        top = entries[0]
+        label = _entry_label(top, "project" if kind == "projects" else kind[:-1] if kind.endswith("s") else kind)
+        if label:
+            evidence.append(label)
+
+    gaps = []
+    missing_terms = match_summary.get("missing_terms") or []
+    if missing_terms:
+        gaps.append(f"Target keywords still weak in profile: {', '.join(missing_terms[:5])}.")
+    if not (selected_payload.get("projects") or []):
+        gaps.append("No project selected for this role, which weakens portfolio proof.")
+    if not (selected_payload.get("experience") or []):
+        gaps.append("No strong experience matched the target, so interviews may rely heavily on projects.")
+    if not (selected_payload.get("skills") or []):
+        gaps.append("Core skills section is thin for this target.")
+
+    return {
+        "matched_keywords": sanitize_string_list(match_summary.get("covered_terms") or [], max_items=20, max_length=60),
+        "missing_keywords": sanitize_string_list(missing_terms, max_items=10, max_length=60),
+        "strongest_evidence": evidence[:4],
+        "risk_flags": gaps[:4],
+        "selected_counts": match_summary.get("selected_counts") or {},
+    }
+
+
+def _build_job_specific_questions(profile: dict, selected_payload: dict) -> dict:
+    target = selected_payload.get("target") or {}
+    playbooks = _selected_role_playbooks(profile, target)
+    target_role = target.get("job_title") or "ce poste"
+    company_name = target.get("company_name") or "cette entreprise"
+
+    motivation_questions = [
+        {
+            "category": "Motivation",
+            "question": f"Pourquoi {target_role} chez {company_name} plutot qu'un poste plus generaliste ?",
+            "why_asked": "Verifier si ton choix est intentionnel et relie au contexte de l'entreprise.",
+            "answer_shape": "1 raison liee a l'entreprise, 1 raison liee au role, 1 preuve issue de ton parcours.",
+            "evidence_refs": sanitize_string_list(
+                [profile.get("headline", ""), *(profile.get("target_roles") or []), *(selected_payload.get("skills") or [])],
+                max_items=3,
+                max_length=80,
+            ),
+        },
+        {
+            "category": "Motivation",
+            "question": f"Qu'est-ce qui te rend utile rapidement sur {target_role} meme si tu es encore en phase d'apprentissage ?",
+            "why_asked": "Mesurer ta capacite a te projeter avec humilite et impact.",
+            "answer_shape": "Commence par tes bases solides, puis explique ce que tu apprendras vite.",
+            "evidence_refs": sanitize_string_list(selected_payload.get("skills") or [], max_items=3, max_length=80),
+        },
+    ]
+
+    behavioural_questions = []
+    for entry in (selected_payload.get("experience") or [])[:2]:
+        behavioural_questions.append(
+            {
+                "category": "Behavioural",
+                "question": f"Raconte une situation concrete autour de {_entry_label(entry, 'experience')}.",
+                "why_asked": "Verifier ton niveau de clarte sur ce que tu as vraiment porte.",
+                "answer_shape": "Version 30 secondes puis STAR complete avec resultat et apprentissage.",
+                "evidence_refs": _entry_focus_points(entry, "experience") or [_entry_label(entry, "experience")],
+            }
+        )
+    for entry in (selected_payload.get("projects") or [])[:2]:
+        behavioural_questions.append(
+            {
+                "category": "Behavioural",
+                "question": f"Sur {_entry_label(entry, 'project')}, quel choix difficile as-tu du faire et pourquoi ?",
+                "why_asked": "Comprendre ton raisonnement, pas seulement le resultat final.",
+                "answer_shape": "Contexte, options, choix, arbitrage, impact, apprentissage.",
+                "evidence_refs": _entry_focus_points(entry, "project") or [_entry_label(entry, "project")],
+            }
+        )
+
+    technical_questions = []
+    evidence_refs = sanitize_string_list(
+        [
+            *[_entry_label(entry, "experience") for entry in (selected_payload.get("experience") or [])[:2]],
+            *[_entry_label(entry, "project") for entry in (selected_payload.get("projects") or [])[:2]],
+        ],
+        max_items=4,
+        max_length=120,
+    )
+    for playbook in playbooks:
+        bank = TECHNICAL_QUESTION_BANK.get(playbook["slug"], [])[:2]
+        for item in bank:
+            technical_questions.append(
+                {
+                    "category": playbook["label"],
+                    "question": item["question"],
+                    "why_asked": item["why_asked"],
+                    "answer_shape": item["answer_shape"],
+                    "evidence_refs": evidence_refs[:3],
+                }
+            )
+
+    return {
+        "motivation_questions": motivation_questions[:3],
+        "behavioural_questions": behavioural_questions[:4],
+        "technical_questions": technical_questions[:6],
+    }
+
+
+def _build_star_stories(selected_payload: dict) -> list[dict]:
+    stories = []
+    for entry in (selected_payload.get("experience") or [])[:3]:
+        stories.append(
+            {
+                "source_kind": "experience",
+                "source_id": entry.get("id"),
+                "title": _entry_label(entry, "experience"),
+                "when_to_use": "Pour parler d'impact concret en contexte professionnel.",
+                "prompt": f"Explique {_entry_label(entry, 'experience')} en STAR: contexte, objectif, actions a toi, resultat, apprentissage.",
+                "focus_points": _entry_focus_points(entry, "experience"),
+            }
+        )
+    for entry in (selected_payload.get("projects") or [])[:3]:
+        stories.append(
+            {
+                "source_kind": "project",
+                "source_id": entry.get("id"),
+                "title": _entry_label(entry, "project"),
+                "when_to_use": "Pour justifier ton niveau technique, ton autonomie ou ta capacite a livrer.",
+                "prompt": f"Structure {_entry_label(entry, 'project')} en STAR en insistant sur les decisions techniques et le resultat observable.",
+                "focus_points": _entry_focus_points(entry, "project"),
+            }
+        )
+    return stories[:6]
+
+
+def _build_targeted_project_ideas(profile: dict, selected_payload: dict) -> list[dict]:
+    target = selected_payload.get("target") or {}
+    fit_summary = _build_fit_summary(selected_payload)
+    playbooks = _selected_role_playbooks(profile, target)
+    missing = set(fit_summary.get("missing_keywords") or [])
+    ideas = []
+    for playbook in playbooks:
+        for idea in playbook["ideas"]:
+            why = idea["why_it_helps"]
+            if missing:
+                why = f"{why} Cela peut aussi couvrir: {', '.join(sorted(missing)[:3])}."
+            ideas.append(
+                {
+                    "track": playbook["label"],
+                    "title": idea["title"],
+                    "brief": idea["brief"],
+                    "stack": idea["stack"],
+                    "why_it_helps": why,
+                }
+            )
+    return ideas[:6]
+
+
+def _build_strengthening_actions(selected_payload: dict) -> list[str]:
+    actions = []
+    for entry in (selected_payload.get("experience") or [])[:2]:
+        label = _entry_label(entry, "experience")
+        if label:
+            actions.append(f"Prepare une version courte puis detaillee de {label} avec ton perimetre exact.")
+        if not entry.get("highlights"):
+            actions.append(f"Ajoute 2 a 3 bullets plus concretes a {label} pour montrer tes actions reelles.")
+    for entry in (selected_payload.get("projects") or [])[:2]:
+        label = _entry_label(entry, "project")
+        if label:
+            actions.append(f"Prepare une demo, capture ou README plus lisible pour {label}.")
+        if not entry.get("url"):
+            actions.append(f"Publie un lien visible pour {label} si possible.")
+
+    missing_terms = (selected_payload.get("match_summary") or {}).get("missing_terms") or []
+    if missing_terms:
+        actions.append(f"Clarifie ou renforce les signaux lies a: {', '.join(missing_terms[:4])}.")
+    actions.append("Prepare une explication claire de tes choix techniques, pas seulement de la stack.")
+    actions.append("Repere un exemple ou tu as appris vite ou debloque un probleme ambigu.")
+    return sanitize_string_list(actions, max_items=6, max_length=180)
+
+
+def _merge_ai_prep_enrichment(base_payload: dict) -> tuple[dict, list[str]]:
+    prompt_payload = {
+        "target": base_payload.get("target_snapshot") or {},
+        "fit_summary": base_payload.get("fit_summary") or {},
+        "selected_evidence": base_payload.get("selected_evidence") or {},
+        "interview_questions": base_payload.get("interview_questions") or {},
+        "star_stories": base_payload.get("star_stories") or [],
+        "portfolio_ideas": base_payload.get("portfolio_ideas") or [],
+        "strengthening_actions": base_payload.get("strengthening_actions") or [],
+    }
+    try:
+        ai_payload = generate_application_prep_copy(prompt_payload)
+    except (AnthropicConfigError, AnthropicResponseError):
+        return base_payload, []
+
+    enriched = dict(base_payload)
+    notes = sanitize_string_list(ai_payload.get("copy_notes") or [], max_items=8, max_length=180)
+    for section in ["motivation_questions", "behavioural_questions", "technical_questions"]:
+        items = []
+        for raw in ((ai_payload.get("interview_questions") or {}).get(section) or []):
+            if not isinstance(raw, dict):
+                continue
+            items.append(
+                {
+                    "question": sanitize_line(raw.get("question"), 220),
+                    "why_asked": sanitize_line(raw.get("why_asked"), 220),
+                    "answer_shape": sanitize_line(raw.get("answer_shape"), 220),
+                }
+            )
+        if items:
+            merged_items = []
+            existing_items = enriched["interview_questions"].get(section) or []
+            for index, item in enumerate(existing_items):
+                overlay = items[index] if index < len(items) else {}
+                merged_items.append(
+                    {
+                        **item,
+                        **{key: value for key, value in overlay.items() if value},
+                    }
+                )
+            enriched["interview_questions"][section] = merged_items
+
+    ai_stories = []
+    for index, raw in enumerate(ai_payload.get("star_stories") or []):
+        if not isinstance(raw, dict) or index >= len(enriched["star_stories"]):
+            continue
+        base_story = dict(enriched["star_stories"][index])
+        if raw.get("title"):
+            base_story["title"] = sanitize_line(raw.get("title"), 140)
+        if raw.get("prompt"):
+            base_story["prompt"] = sanitize_line(raw.get("prompt"), 240)
+        if raw.get("when_to_use"):
+            base_story["when_to_use"] = sanitize_line(raw.get("when_to_use"), 180)
+        ai_stories.append(base_story)
+    if ai_stories:
+        enriched["star_stories"] = ai_stories
+
+    ai_portfolio_ideas = []
+    for index, raw in enumerate(ai_payload.get("portfolio_ideas") or []):
+        if not isinstance(raw, dict) or index >= len(enriched["portfolio_ideas"]):
+            continue
+        base_idea = dict(enriched["portfolio_ideas"][index])
+        if raw.get("title"):
+            base_idea["title"] = sanitize_line(raw.get("title"), 140)
+        if raw.get("brief"):
+            base_idea["brief"] = sanitize_block(raw.get("brief"), 240)
+        if raw.get("why_it_helps"):
+            base_idea["why_it_helps"] = sanitize_block(raw.get("why_it_helps"), 220)
+        ai_portfolio_ideas.append(base_idea)
+    if ai_portfolio_ideas:
+        enriched["portfolio_ideas"] = ai_portfolio_ideas
+
+    ai_actions = sanitize_string_list(ai_payload.get("strengthening_actions") or [], max_items=6, max_length=180)
+    if ai_actions:
+        enriched["strengthening_actions"] = ai_actions
+
+    return enriched, notes
+
+
+def build_application_prep(profile: dict, application_record: dict) -> dict:
+    try:
+        from cv_engine import build_target_snapshot, build_targeted_cv_draft
+    except ModuleNotFoundError:
+        from backend.cv_engine import build_target_snapshot, build_targeted_cv_draft
+
+    target_snapshot = build_target_snapshot("application", application_record)
+    draft_payload = build_targeted_cv_draft(profile, target_snapshot, "moderncv-classic")
+    selected_payload = draft_payload.get("selected_payload") or {}
+
+    base_payload = {
+        "target_snapshot": target_snapshot,
+        "fit_summary": _build_fit_summary(selected_payload),
+        "selected_evidence": {
+            "skills": selected_payload.get("skills") or [],
+            "experience": selected_payload.get("experience") or [],
+            "projects": selected_payload.get("projects") or [],
+            "education": selected_payload.get("education") or [],
+        },
+        "interview_questions": _build_job_specific_questions(profile, selected_payload),
+        "star_stories": _build_star_stories(selected_payload),
+        "portfolio_ideas": _build_targeted_project_ideas(profile, selected_payload),
+        "strengthening_actions": _build_strengthening_actions(selected_payload),
+    }
+
+    enriched_payload, copy_notes = _merge_ai_prep_enrichment(base_payload)
+    enriched_payload["copy_notes"] = copy_notes
+    return enriched_payload

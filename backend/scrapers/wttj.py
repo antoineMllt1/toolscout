@@ -68,7 +68,7 @@ def _fetch_algolia_credentials() -> tuple[str, str]:
 
 class WTTJScraper(BaseScraper):
     SOURCE = "wttj"
-    DELAY = 1.2
+    DELAY = 0.7
 
     def __init__(self, cookies: dict | None = None):
         super().__init__(cookies)
@@ -88,7 +88,7 @@ class WTTJScraper(BaseScraper):
         while count < max_results:
             payload = {
                 "query": search_query,
-                "hitsPerPage": min(30, max_results * 3),  # Fetch more, many will be filtered
+                "hitsPerPage": min(50, max(20, max_results)),
                 "page": page,
                 "attributesToRetrieve": [
                     "name", "slug", "organization", "offices",
@@ -178,7 +178,7 @@ class WTTJScraper(BaseScraper):
         summary   = _to_str(hit.get("summary"))
         full_text = " ".join(filter(None, [profile, missions, summary]))
 
-        context = self.extract_tool_context(full_text, tool)
+        context = self.extract_search_context(full_text, tool, hit.get("name", ""))
         if not context:
             return None  # Only keep jobs that actually mention the tool
 

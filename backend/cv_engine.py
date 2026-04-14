@@ -368,6 +368,53 @@ def build_target_snapshot(source_kind: str, record: dict) -> dict:
     }
 
 
+def build_job_analysis_fallback(target: dict) -> dict:
+    keywords = sanitize_string_list(target.get("keywords") or [], max_items=10, max_length=50)
+    excerpts = sanitize_string_list(target.get("excerpts") or [], max_items=3, max_length=200)
+    return {
+        "role_summary": sanitize_block(" ".join(excerpts), 320) or sanitize_line(target.get("job_title"), 180),
+        "priority_keywords": keywords[:8],
+        "must_have_skills": keywords[:6],
+        "nice_to_have_skills": keywords[6:10],
+        "core_missions": excerpts[:3],
+        "candidate_angle": sanitize_line(target.get("job_title"), 180),
+        "language": "fr" if re.search(r"[àâçéèêëîïôûùüÿœ]", " ".join(excerpts).lower()) or "alternance" in " ".join(keywords) else "en",
+        "seniority_hint": sanitize_line((target.get("normalized") or {}).get("seniority", {}).get("label"), 80),
+        "selection_focus": keywords[:6],
+        "risks": [],
+    }
+
+
+def merge_job_analysis(target: dict, analysis: dict | None) -> dict:
+    clean_analysis = analysis or {}
+    merged = dict(target or {})
+    merged["job_analysis"] = {
+        "role_summary": sanitize_block(clean_analysis.get("role_summary"), 400),
+        "priority_keywords": sanitize_string_list(clean_analysis.get("priority_keywords"), max_items=12, max_length=60),
+        "must_have_skills": sanitize_string_list(clean_analysis.get("must_have_skills"), max_items=10, max_length=60),
+        "nice_to_have_skills": sanitize_string_list(clean_analysis.get("nice_to_have_skills"), max_items=8, max_length=60),
+        "core_missions": sanitize_string_list(clean_analysis.get("core_missions"), max_items=6, max_length=160),
+        "candidate_angle": sanitize_line(clean_analysis.get("candidate_angle"), 220),
+        "language": sanitize_line(clean_analysis.get("language"), 40),
+        "seniority_hint": sanitize_line(clean_analysis.get("seniority_hint"), 80),
+        "selection_focus": sanitize_string_list(clean_analysis.get("selection_focus"), max_items=8, max_length=100),
+        "risks": sanitize_string_list(clean_analysis.get("risks"), max_items=6, max_length=160),
+    }
+    analysis_tokens = _tokenize(
+        " ".join(
+            [
+                *merged["job_analysis"]["priority_keywords"],
+                *merged["job_analysis"]["must_have_skills"],
+                *merged["job_analysis"]["selection_focus"],
+                merged["job_analysis"]["candidate_angle"],
+                *merged["job_analysis"]["core_missions"],
+            ]
+        )
+    )
+    merged["keywords"] = sanitize_string_list([*(merged.get("keywords") or []), *analysis_tokens], max_items=30, max_length=50)
+    return merged
+
+
 def _select_skills(skills: list[str], target_keywords: list[str], limit: int = 10) -> list[str]:
     matched = []
     remainder = []
@@ -429,7 +476,63 @@ def build_targeted_cv_draft(profile: dict, target: dict, template_slug: str) -> 
     }
 
 
+def apply_evidence_selection(profile: dict, draft_payload: dict, selection: dict | None) -> dict:
+    if not selection:
+        return draft_payload
+
+    selected_payload = dict(draft_payload.get("selected_payload") or {})
+    profile_experience = {item.get("id"): item for item in profile.get("experience") or [] if item.get("id")}
+    profile_projects = {item.get("id"): item for item in profile.get("projects") or [] if item.get("id")}
+    profile_education = {item.get("id"): item for item in profile.get("education") or [] if item.get("id")}
+
+    def choose(ids: list[str], lookup: dict[str, dict], fallback: list[dict], limit: int) -> list[dict]:
+        picked = []
+        for item_id in sanitize_string_list(ids, max_items=limit, max_length=60):
+            if item_id in lookup and item_id not in {entry.get("id") for entry in picked}:
+                picked.append(dict(lookup[item_id]))
+        return picked[:limit] or list(fallback[:limit])
+
+    selected_payload["experience"] = choose(selection.get("experience_ids") or [], profile_experience, selected_payload.get("experience") or [], 3)
+    selected_payload["projects"] = choose(selection.get("project_ids") or [], profile_projects, selected_payload.get("projects") or [], 3)
+    selected_payload["education"] = choose(selection.get("education_ids") or [], profile_education, selected_payload.get("education") or [], 2)
+
+    valid_skills = set(profile.get("skills") or [])
+    chosen_skills = [skill for skill in sanitize_string_list(selection.get("skill_names") or [], max_items=10, max_length=80) if skill in valid_skills]
+    if chosen_skills:
+        selected_payload["skills"] = chosen_skills[:10]
+
+    target_keywords = selected_payload.get("target", {}).get("keywords") or []
+    covered_terms = set()
+    for entry in [*(selected_payload.get("experience") or []), *(selected_payload.get("projects") or []), *(selected_payload.get("education") or [])]:
+        covered_terms.update(_tokenize(_entry_corpus(entry, "project" if "technologies" in entry else "education" if "school" in entry else "experience")))
+    for skill in selected_payload.get("skills") or []:
+        covered_terms.update(_tokenize(skill))
+    selected_payload["match_summary"] = {
+        "covered_terms": sorted(term for term in covered_terms if term in target_keywords)[:20],
+        "missing_terms": [term for term in target_keywords if term not in covered_terms][:10],
+        "selected_counts": {
+            "experience": len(selected_payload.get("experience") or []),
+            "projects": len(selected_payload.get("projects") or []),
+            "education": len(selected_payload.get("education") or []),
+            "skills": len(selected_payload.get("skills") or []),
+        },
+    }
+    selected_payload["selection_plan"] = {
+        "cv_focus": sanitize_line(selection.get("cv_focus"), 240),
+        "selection_notes": sanitize_string_list(selection.get("selection_notes"), max_items=8, max_length=180),
+    }
+
+    refreshed = dict(draft_payload)
+    refreshed["selected_payload"] = selected_payload
+    template = draft_payload["template"]
+    refreshed["latex_source"] = render_moderncv_latex(profile, template, selected_payload)
+    refreshed["prompt_payload"] = build_copywriting_payload(profile, selected_payload, template)
+    return refreshed
+
+
 def build_copywriting_payload(profile: dict, selected_payload: dict, template: dict) -> dict:
+    target = selected_payload["target"]
+    sector_hint = ", ".join((target.get("keywords") or [])[:8])
     return {
         "template": {
             "family": template["family"],
@@ -442,8 +545,11 @@ def build_copywriting_payload(profile: dict, selected_payload: dict, template: d
             "headline": profile.get("headline", ""),
             "summary": profile.get("summary", ""),
             "location": profile.get("location", ""),
+            "target_roles": profile.get("target_roles", []),
         },
-        "target": selected_payload["target"],
+        "target": target,
+        "job_analysis": target.get("job_analysis") or {},
+        "sector_hint": sector_hint,
         "allowed_facts": {
             "skills": selected_payload["skills"],
             "languages": selected_payload["languages"],
@@ -452,10 +558,12 @@ def build_copywriting_payload(profile: dict, selected_payload: dict, template: d
             "projects": selected_payload["projects"],
             "education": selected_payload["education"],
         },
+        "selection_plan": selected_payload.get("selection_plan") or {},
         "instructions": [
             "Rewrite only inside the selected facts.",
-            "Keep the moderncv structure unchanged.",
-            "Favor concise bullets aligned with the target role keywords.",
+            "Favor a high-performer recruiter-ready tone.",
+            "Favor concise but strong bullets aligned with the target role keywords.",
+            "Use this as a true rewrite, not as light editing.",
             "Do not output any fact that is absent from the allowed facts payload.",
         ],
     }
